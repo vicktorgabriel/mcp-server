@@ -1,0 +1,50 @@
+
+╔════════════════════════════════════════════╗
+║     MCP Server Local v2 - OAuth2 + JWT    ║
+╠════════════════════════════════════════════╣
+║  🚀 Corriendo en: http://localhost:3000      ║
+╠════════════════════════════════════════════╣
+║  Métodos de autenticación:                ║
+║  - API Key (X-API-Key header)            ║
+║  - OAuth2 + JWT (Authorization header)   ║
+╠════════════════════════════════════════════╣
+║  Endpoints:                               ║
+║  - GET  /health                          ║
+║  - POST /auth/register                   ║
+║  - POST /auth/login                      ║
+║  - POST /auth/refresh                    ║
+║  - POST /auth/oauth-verify               ║
+║  - GET  /api/read                        ║
+║  - POST /api/write                       ║
+║  - GET  /api/list                        ║
+║  - POST /api/execute                     ║
+╚════════════════════════════════════════════╝
+
+💡 Probar: curl http://localhost:3000/health
+🔐 JWT Secret: $(openssl rand -base...
+
+
+╔════════════════════════════════════════════╗
+║     MCP Server Local v2 - OAuth2 + JWT    ║
+╠════════════════════════════════════════════╣
+║  🚀 Corriendo en: http://localhost:3000      ║
+╠════════════════════════════════════════════╣
+║  Métodos de autenticación:                ║
+║  - API Key (X-API-Key header)            ║
+║  - OAuth2 + JWT (Authorization header)   ║
+╠════════════════════════════════════════════╣
+║  Endpoints:                               ║
+║  - GET  /health                          ║
+║  - POST /auth/register                   ║
+║  - POST /auth/login                      ║
+║  - POST /auth/refresh                    ║
+║  - POST /auth/oauth-verify               ║
+║  - GET  /api/read                        ║
+║  - POST /api/write                       ║
+║  - GET  /api/list                        ║
+║  - POST /api/execute                     ║
+╚════════════════════════════════════════════╝
+
+💡 Probar: curl http://localhost:3000/health
+🔐 JWT Secret: $(openssl rand -base...
+

@@ -1,0 +1,21 @@
+{
+  "name": "mcp-server-local",
+  "version": "1.0.0",
+  "description": "MCP Server Local para acceso a archivos del sistema",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "setup": "chmod +x setup.sh && ./setup.sh"
+  },
+  "keywords": ["mcp", "model-context-protocol", "file-system", "remote-access"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "bcryptjs": "^2.4.3"
+  }
+}
