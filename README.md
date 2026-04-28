@@ -1,405 +1,171 @@
-# MCP Server - Servidor de Archivos con OAuth2
+# MCP Server Local
 
-**Todo completamente automatizado. Un comando, un archivo de guía.**
+Servidor MCP para exponer carpetas locales a clientes IA con permisos de lectura y escritura controlados por `ALLOWED_PATHS`.
 
----
+Soporta dos modos:
 
-## 🚀 Inicio Rápido
+- `stdio`: para clientes locales como Claude Desktop.
+- `HTTP/SSE`: para clientes web como ChatGPT Web y Claude Web, normalmente publicado con ngrok.
+
+## Inicio rapido con ngrok
 
 ```bash
 cd /mnt/4tb-hdd/repo/mcp-server-local
 ./start-mcp.sh
 ```
 
-**Se mostrará un menú interactivo donde puedes elegir:**
+El script levanta el servidor HTTP, abre un tunel ngrok y muestra algo como:
 
+```text
+ChatGPT Web:   https://abc123.ngrok-free.app/mcp
+Claude Web:    https://abc123.ngrok-free.app/sse
+Claude local:  node /mnt/4tb-hdd/repo/mcp-server-local/mcp-server.js --stdio
+Allowed paths: /mnt/4tb-hdd/repo
+Activity log:  activity.log
 ```
-1) OAuth2 (recomendado)
-2) API Key (legacy)
-3) Mostrar ayuda
-```
 
-**Elige una opción y presiona Enter.**
+Deja esa terminal abierta. `Ctrl+C` detiene Node y ngrok.
 
----
+## Registro de actividad
 
-## 📋 Primer Inicio vs Próximos Inicios
-
-### 🟢 PRIMER INICIO (15-30 segundos)
+Cada llamada a herramientas queda registrada en el CLI con prefijo `[ACTIVITY]` y, si `ACTIVITY_LOG` esta configurado, tambien en formato JSONL:
 
 ```bash
-$ ./start-mcp.sh
-
-↓ Verás el menú interactivo:
-
-  1) OAuth2 (recomendado)
-     Usa JWT para seguridad máxima
-  
-  2) API Key (legacy)
-     Usa solo API Key (más simple)
-  
-  3) Mostrar ayuda
-
-Selecciona una opción (1-3): 1
-↓ (presiona Enter después de escribir)
-
-↓ El script automáticamente:
-  1. Crea .env con JWT_SECRET
-  2. Instala dependencias npm
-  3. Crea usuario: mcp-admin
-  4. Genera contraseña ALEATORIA
-  5. Muestra en pantalla ← GUARDA ESTA CONTRASEÑA
-  6. Crea .credentials (permisos 600)
-  7. Inicia servidor OAuth (puerto 3000)
-  8. Pregunta: ¿ngrok? (s/n)
-  9. Muestra instrucciones finales
-  10. Servidor esperando
+tail -f activity.log
 ```
 
-**Debes guardar:**
-```
-Username:   mcp-admin
-Email:      admin@mcp.local
-Password:   (mostrada en pantalla)
-```
+El registro incluye herramienta, ruta/comando, estado, duracion y tamanos aproximados. No guarda contenido de archivos ni el texto completo escrito.
 
----
+## Configurar carpetas expuestas
 
-### 🔄 PRÓXIMOS INICIOS (10-20 segundos)
+Puedes usar variables de entorno o `.env`:
 
 ```bash
-$ ./start-mcp.sh
-
-↓ Verás el menú interactivo (igual que antes)
-
-Selecciona una opción (1-3): 1
-↓ (presiona Enter después de escribir)
-
-↓ El script automáticamente:
-  1. Lee .env (ya existe)
-  2. Lee node_modules (ya existe)
-  3. Lee .users.json (usuario ya existe)
-  4. NO crea nuevo usuario
-  5. NO genera nueva contraseña
-  6. Inicia servidor OAuth
-  7. Pregunta: ¿ngrok? (s/n)
-  8. Muestra instrucciones
-  9. Servidor esperando
+ALLOWED_PATHS=/mnt/4tb-hdd/repo,/tmp/mcp-test
+WORKING_DIR=/mnt/4tb-hdd/repo
+PORT=3000
+HOST=127.0.0.1
+ACTIVITY_LOG=activity.log
 ```
 
-**Más rápido porque reutiliza todo.**
+Las rutas relativas que reciba la IA se resuelven contra la primera carpeta de `ALLOWED_PATHS`. Las rutas absolutas solo funcionan si estan dentro de alguna carpeta permitida.
 
----
+## ChatGPT Web
 
-## 🔐 Credenciales
+1. Activa Developer Mode en ChatGPT: Settings -> Connectors -> Advanced -> Developer mode.
+2. Ve a Settings -> Connectors.
+3. Agrega un conector MCP remoto/custom.
+4. Usa la URL que imprime el CLI:
 
-### Primer Inicio: Generadas Automáticamente
-
+```text
+https://TU-NGROK.ngrok-free.app/mcp
 ```
-Username:   mcp-admin
-Email:      admin@mcp.local
-Password:   (ALEATORIA, mostrada en pantalla)
+
+5. Autenticacion: `No authentication`, salvo que configures `MCP_AUTH_TOKEN`.
+
+ChatGPT puede usar `search` y `fetch` como conector normal. Para `list_files`, `read_file` y `write_file`, usa Developer Mode porque son herramientas MCP completas, incluyendo escritura.
+
+## Browser y artifacts
+
+El servidor responde CORS para clientes web, incluyendo preflight `OPTIONS`, headers MCP y Private Network Access. Desde una pagina HTTPS como Claude/ChatGPT suele ser mas estable usar la URL HTTPS de ngrok:
+
+```text
+https://TU-NGROK.ngrok-free.app/mcp
 ```
 
-**Guardadas en `.credentials`** (permisos 600 - solo lectura)
+Evita `http://localhost:3000` desde un artifact si el navegador lo bloquea por politicas de red local o contenido mixto.
 
-### Próximos Inicios: Reutilizadas
+## Claude Web
+
+Si tu plan/interfaz permite servidores MCP remotos, agrega:
+
+```text
+https://TU-NGROK.ngrok-free.app/sse
+```
+
+El servidor tambien expone `/mcp` por Streamable HTTP; si Claude ofrece esa opcion, puedes usar:
+
+```text
+https://TU-NGROK.ngrok-free.app/mcp
+```
+
+## Claude Desktop o clientes MCP locales
+
+Usa el transporte stdio:
+
+```json
+{
+  "mcpServers": {
+    "local-files": {
+      "command": "node",
+      "args": [
+        "/mnt/4tb-hdd/repo/mcp-server-local/mcp-server.js",
+        "--stdio"
+      ],
+      "env": {
+        "ALLOWED_PATHS": "/mnt/4tb-hdd/repo"
+      }
+    }
+  }
+}
+```
+
+Tambien puedes ejecutar:
 
 ```bash
-cat .credentials
+./start-mcp-real.sh
 ```
 
-Mismo usuario, misma contraseña de siempre.
+## Herramientas disponibles
 
----
+- `search`: busca archivos por nombre o contenido. Compatible con conectores ChatGPT.
+- `fetch`: lee un archivo devuelto por `search`. Compatible con conectores ChatGPT.
+- `list_files`: lista directorios.
+- `read_file`: lee archivos UTF-8.
+- `write_file`: escribe o agrega contenido en archivos UTF-8.
+- `patch_file`: aplica reemplazos exactos `search/replace` sobre archivos UTF-8.
+- `run_command`: ejecuta comandos locales con `cwd` validado dentro de `ALLOWED_PATHS`.
 
-## 🔐 Dos Modos de OAuth2
+## Seguridad
 
-El sistema tiene dos servidores disponibles:
+El servidor nunca permite acceder fuera de `ALLOWED_PATHS`. No expongas carpetas sensibles.
 
-### 1️⃣ OAuth2 Provider (para conectar desde web)
+`run_command` puede ejecutar procesos locales. Por defecto no usa shell y recibe `command` + `args`; si habilitas `shell: true`, tratalo como acceso completo a tu usuario del sistema dentro del contexto permitido.
 
-**Archivo:** `server-oauth2-provider.js`
-
-Proveedor OAuth2 estándar (RFC 6749) compatible con:
-- ✅ Claude Web
-- ✅ ChatGPT Web  
-- ✅ Blender
-- ✅ Cualquier aplicación que soporte OAuth2
-- ✅ Intermediario entre aplicaciones e IA
-
-**Flujo de autorización:**
-```
-Aplicación (Blender/Claude Web)
-    ↓
-Redirige a: http://localhost:3000/oauth/authorize
-    ↓
-Usuario ve formulario de login
-    ↓
-Usuario autoriza
-    ↓
-Sistema envía token a la aplicación
-    ↓
-Aplicación puede acceder al MCP con el token
-```
-
-**Endpoints OAuth2 estándar:**
-- `GET /oauth/authorize` - Formulario de login y consentimiento
-- `POST /oauth/token` - Obtener access token
-- `GET /oauth/userinfo` - Información del usuario
-- `GET /.well-known/oauth-authorization-server` - Discovery
-
-### 2️⃣ OAuth2 Simple (servidor actual)
-
-**Archivo:** `server-oauth.js`
-
-Genera JWT tokens de manera simple para CLI.
-
----
-
-## 🌐 Conectar desde GPT/Claude/Copilot
-
-El servidor proporciona instrucciones automáticamente al iniciar:
-
-```
-────────────────────────────────────────────────────
-INSTRUCCIONES PARA CONECTAR
-────────────────────────────────────────────────────
-
-1. En tu cliente (GPT/Claude/Copilot):
-
-   URL Base: http://localhost:3000
-   Username: mcp-admin
-   Password: [tu contraseña]
-   
-   (O si activaste ngrok: https://[tu-ngrok-url])
-
-2. Autenticación:
-
-   POST /auth/login
-   {
-     "username": "mcp-admin",
-     "password": "[tu-contraseña]"
-   }
-   
-   Respuesta:
-   {
-     "token": "eyJhbGc..."
-   }
-
-3. Usar el token:
-
-   GET /api/list
-   Header: Authorization: Bearer [tu-token]
-
-4. Operaciones disponibles:
-
-   GET  /api/list      - Listar archivos
-   GET  /api/read      - Leer archivo
-   POST /api/write     - Escribir archivo
-   POST /api/execute   - Ejecutar comando
-
-5. Renovar token (cada 24h):
-
-   POST /auth/refresh
-   Header: Authorization: Bearer [tu-token]
-
-────────────────────────────────────────────────────
-```
-
-### Con ngrok (túnel público)
-
-Si respondiste **sí** a la pregunta `¿ngrok?`:
-
-```
-ngrok iniciado: https://abc123def.ngrok.io
-
-Usa esta URL en lugar de http://localhost:3000
-```
-
-**Nueva URL pública cada vez que inicies.**
-
----
-
-## 📁 Estructura de Archivos
-
-```
-mcp-server-local/
-├── README.md                 ← Este archivo (guía completa)
-├── start-mcp.sh              ← Único arrancador
-├── init-mcp.sh               ← Automatización (no tocar)
-├── package.json
-├── server-oauth.js           ← Servidor OAuth2
-├── client-oauth.py           ← Cliente Python
-├── server.js                 ← Servidor legacy (opcional)
-├── client.py                 ← Cliente legacy (opcional)
-└── [Generados en primer inicio]
-    ├── .env                  ← JWT_SECRET + configuración
-    ├── .credentials          ← Usuario + contraseña
-    ├── .users.json           ← Base de datos usuarios (temporal)
-    ├── node_modules/         ← Dependencias npm
-    └── mcp-server.log        ← Logs del servidor
-```
-
----
-
-## 🗜️ Comprimir y Guardar en Otro Lado
-
-### Opción 1: Ligero (SIN dependencias)
+Opcionalmente puedes exigir bearer token en HTTP:
 
 ```bash
-./backup.sh
-# Elige opción 1 (LIGERO)
+MCP_AUTH_TOKEN="$(openssl rand -hex 24)" ./start-mcp.sh
 ```
 
-**Resultado:** `~/backups/backup_TIMESTAMP.tar.gz` (~100KB)
+Luego configura el cliente con:
 
-Ideal para guardar proyecto limpio, sin node_modules.
+```text
+Authorization: Bearer <token>
+```
 
-### Opción 2: Manual rápido
+Si el cliente web no permite bearer tokens, deja `MCP_AUTH_TOKEN` vacio y usa solo carpetas no sensibles.
+
+## Endpoints
+
+- `GET /health`: estado.
+- `GET /config`: configuracion sugerida para clientes.
+- `GET /tools`: diagnostico de herramientas MCP expuestas.
+- `POST /mcp`: MCP Streamable HTTP.
+- `GET /mcp`: stream SSE de Streamable HTTP.
+- `GET /sse` y `POST /messages`: transporte SSE legacy.
+
+## Prueba rapida
 
 ```bash
-tar --exclude='node_modules' \
-    --exclude='.env' \
-    --exclude='.credentials' \
-    --exclude='.users.json' \
-    --exclude='mcp-server.log' \
-    -czf mcp-server-local-backup.tar.gz mcp-server-local/
+node mcp-server.js --http
 ```
 
-### Restaurar en otra máquina
+En otra terminal:
 
 ```bash
-tar -xzf mcp-server-local-backup.tar.gz
-cd mcp-server-local
-./start-mcp.sh    ← El script crea usuario si es necesario
+curl -s http://127.0.0.1:3000/health
+curl -s http://127.0.0.1:3000/mcp \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
-
----
-
-## 📊 Comportamiento Resumido
-
-| Aspecto | Primer Inicio | Próximos Inicios |
-|--------|--------------|-----------------|
-| **Crear usuario** | ✓ SÍ | ✓ NO |
-| **Generar contraseña** | ✓ SÍ (muestra) | ✓ NO (reutiliza) |
-| **npm install** | ✓ SÍ (si falta) | ✓ NO (ya existe) |
-| **Tiempo** | 15-30 seg | 10-20 seg |
-| **.env** | CREADO | Reutilizado |
-| **.credentials** | CREADO | Reutilizado |
-| **Instrucciones** | Mostradas | Mostradas |
-
----
-
-## 🔧 Configuración Avanzada
-
-### Usar directamente sin menú
-
-```bash
-# Iniciar OAuth directamente
-./start-mcp.sh oauth
-
-# Iniciar API Key directamente
-./start-mcp.sh legacy
-
-# Ver ayuda
-./start-mcp.sh help
-```
-
-### Cambiar puerto (por defecto 3000)
-
-```bash
-# En start-mcp.sh o init-mcp.sh, busca:
-PORT=${PORT:-3000}
-
-# Cambia a:
-PORT=${PORT:-8080}
-```
-
-### Cambiar carpeta expuesta (por defecto /mnt/4tb-hdd/repo)
-
-```bash
-# En .env:
-ALLOWED_PATHS=/ruta/que/quieras
-```
-
-### Desactivar ngrok (siempre local)
-
-```bash
-# En start-mcp.sh, busca:
-read -p "¿Activar ngrok? (s/n): " ngrok_answer
-
-# Cambia a:
-ngrok_answer="n"
-```
-
----
-
-## 🐛 Troubleshooting
-
-### Error: "Node.js no encontrado"
-```bash
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
-sudo apt install nodejs
-```
-
-### Error: "ngrok no encontrado"
-```bash
-curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok-v3-stable-linux-amd64.zip | unzip -
-sudo mv ngrok /usr/local/bin/
-```
-
-### Cambiar credenciales (crear nuevo usuario)
-
-```bash
-# Elimina archivos de estado:
-rm .credentials .users.json .env
-
-# Reinicia:
-./start-mcp.sh
-
-# El script automáticamente crea nuevo usuario
-```
-
-### Ver contraseña guardada
-
-```bash
-cat .credentials
-```
-
-### Ver logs del servidor
-
-```bash
-tail -f mcp-server.log
-```
-
----
-
-## 📌 Resumen
-
-```
-1 GUÍA COMPLETA:   README.md (este archivo)
-1 ARRANCADOR:      start-mcp.sh
-1 AUTOMATIZACIÓN:  init-mcp.sh (se ejecuta automáticamente)
-
-COMANDO ÚNICO:     ./start-mcp.sh
-
-Primer inicio:     Crea usuario + contraseña
-Próximos inicios:  Reutiliza usuario + contraseña
-Comprime:          ./backup.sh
-Restaura:          tar -xzf + ./start-mcp.sh
-```
-
----
-
-## ✅ Listo
-
-Ejecuta:
-```bash
-./start-mcp.sh
-```
-
-Guarda la contraseña (primer inicio).
-
-**Eso es todo.**
-

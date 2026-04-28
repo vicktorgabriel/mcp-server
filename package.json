@@ -1,21 +1,18 @@
 {
   "name": "mcp-server-local",
   "version": "1.0.0",
-  "description": "MCP Server Local para acceso a archivos del sistema",
-  "main": "server.js",
+  "description": "MCP puro para exponer carpetas locales a ChatGPT Web, Claude y otros clientes MCP",
+  "main": "mcp-server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
-    "setup": "chmod +x setup.sh && ./setup.sh"
+    "test": "npm run check",
+    "check": "node --check mcp-server.js && bash -n start-mcp.sh",
+    "start": "node mcp-server.js --http",
+    "stdio": "node mcp-server.js --stdio",
+    "dev": "node --watch mcp-server.js --http",
+    "tunnel": "./start-mcp.sh"
   },
-  "keywords": ["mcp", "model-context-protocol", "file-system", "remote-access"],
+  "keywords": ["mcp", "model-context-protocol", "filesystem", "chatgpt", "claude"],
   "author": "",
   "license": "MIT",
-  "dependencies": {
-    "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
-    "express": "^4.18.2",
-    "jsonwebtoken": "^9.0.2",
-    "bcryptjs": "^2.4.3"
-  }
+  "dependencies": {}
 }
