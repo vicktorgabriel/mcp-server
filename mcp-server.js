@@ -390,6 +390,9 @@ class MCPFileServer {
     const stats = fs.statSync(fullPath);
     if (!stats.isFile()) throw new Error(`Not a file: ${filePath}`);
 
+    const maxBytes = Number(process.env.READ_LIMIT_BYTES || 10 * 1024 * 1024);
+    if (stats.size > maxBytes) throw new Error(`File too large: ${stats.size} bytes (limit ${maxBytes})`);
+
     return {
       path: displayPath,
       content: fs.readFileSync(fullPath, 'utf8'),
@@ -409,7 +412,14 @@ class MCPFileServer {
     if (mode === 'append') {
       fs.appendFileSync(fullPath, content, 'utf8');
     } else {
-      fs.writeFileSync(fullPath, content, 'utf8');
+      const tmp = `${fullPath}.tmp`;
+      try {
+        fs.writeFileSync(tmp, content, 'utf8');
+        fs.renameSync(tmp, fullPath);
+      } catch (err) {
+        try { fs.unlinkSync(tmp); } catch (_) {}
+        throw err;
+      }
     }
 
     const stats = fs.statSync(fullPath);
@@ -463,7 +473,14 @@ class MCPFileServer {
       });
     }
 
-    fs.writeFileSync(fullPath, content, 'utf8');
+    const tmp = `${fullPath}.tmp`;
+    try {
+      fs.writeFileSync(tmp, content, 'utf8');
+      fs.renameSync(tmp, fullPath);
+    } catch (err) {
+      try { fs.unlinkSync(tmp); } catch (_) {}
+      throw err;
+    }
     const nextStats = fs.statSync(fullPath);
 
     return {
@@ -488,10 +505,11 @@ class MCPFileServer {
     const shell = Boolean(args.shell);
 
     return new Promise((resolve, reject) => {
+      const { MCP_AUTH_TOKEN: _token, ...safeEnv } = process.env;
       const child = spawn(command, commandArgs, {
         cwd,
         shell,
-        env: process.env
+        env: safeEnv
       });
 
       let stdout = '';
@@ -579,24 +597,24 @@ class MCPFileServer {
   }
 
   walkFiles(start, visit) {
-    if (!fs.existsSync(start)) return;
+    if (!fs.existsSync(start)) return false;
     const stats = fs.statSync(start);
 
     if (stats.isFile()) {
-      visit(start);
-      return;
+      return visit(start) === false;
     }
 
     for (const entry of fs.readdirSync(start, { withFileTypes: true })) {
       if (entry.name === 'node_modules' || entry.name === '.git') continue;
       const child = path.join(start, entry.name);
       if (entry.isDirectory()) {
-        this.walkFiles(child, visit);
+        if (this.walkFiles(child, visit)) return true;
       } else if (entry.isFile()) {
-        const shouldContinue = visit(child);
-        if (shouldContinue === false) return;
+        if (visit(child) === false) return true;
       }
     }
+
+    return false;
   }
 
   relativeDisplayPath(filePath) {
@@ -724,7 +742,20 @@ function startHttp() {
         prepareSse(res);
         sessions.set(sessionId, res);
         writeSse(res, 'endpoint', `/messages?sessionId=${sessionId}`);
-        req.on('close', () => sessions.delete(sessionId));
+
+        const heartbeat = setInterval(() => {
+          if (res.writableEnded) {
+            sessions.delete(sessionId);
+            clearInterval(heartbeat);
+          } else {
+            writeSse(res, 'ping', '');
+          }
+        }, 30_000);
+
+        req.on('close', () => {
+          sessions.delete(sessionId);
+          clearInterval(heartbeat);
+        });
         return;
       }
 
