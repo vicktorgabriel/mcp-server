@@ -1,30 +1,79 @@
 # MCP Server Local
 
-Servidor MCP para exponer carpetas locales a clientes IA con permisos de lectura y escritura controlados por `ALLOWED_PATHS`.
+Servidor MCP para exponer carpetas locales a clientes IA con permisos de lectura y escritura; por defecto en este repo corre en modo de acceso completo (`MCP_FULL_ACCESS=1`).
 
 Soporta dos modos:
 
-- `stdio`: para clientes locales como Claude Desktop.
-- `HTTP/SSE`: para clientes web como ChatGPT Web y Claude Web, normalmente publicado con ngrok.
+- `stdio`: recomendado para clientes locales. El cliente MCP levanta el proceso solo cuando necesita usar una herramienta.
+- `HTTP/SSE`: para clientes web como ChatGPT Web y Claude Web, normalmente publicado con ngrok. Este modo deja el servidor corriendo mientras esta expuesto.
 
-## Inicio rapido con ngrok
+## Uso local recomendado: stdio bajo demanda
+
+Para uso local, configura el cliente MCP para ejecutar el servidor por `stdio`. Asi evitas mantener un proceso HTTP abierto y, en clientes compatibles, reduces aprobaciones repetitivas en herramientas de solo lectura porque el servidor ahora las anuncia con metadata `readOnly`.
+
+```json
+{
+  "mcpServers": {
+    "local-files": {
+      "command": "node",
+      "args": [
+        "/mnt/hdd4tb/repo/mcp-server/mcp-server.js",
+        "--stdio"
+      ],
+      "env": {
+        "ALLOWED_PATHS": "/mnt/hdd4tb/repo",
+        "MCP_FULL_ACCESS": "1",
+        "WORKING_DIR": "/mnt/hdd4tb/repo",
+        "MCP_FAST_MODE": "1",
+        "SEARCH_CACHE_TTL_MS": "60000",
+        "SEARCH_MAX_FILE_BYTES": "524288",
+        "SEARCH_MAX_TOTAL_BYTES": "16777216",
+        "SEARCH_SKIP_DIRS": "node_modules,.git,dist,build,.next,.nuxt,.cache,coverage,.venv,venv,__pycache__,target,out",
+        "READ_BATCH_LIMIT": "25",
+        "SSE_HEARTBEAT_MS": "15000",
+        "KEEP_ALIVE_TIMEOUT_MS": "65000"
+      }
+    }
+  }
+}
+```
+
+Notas:
+
+- `search`, `fetch`, `list_files` y `read_file` se anuncian como herramientas de solo lectura.
+- Con `MCP_FULL_ACCESS=1` (valor recomendado en este repo), el servidor habilita acceso completo local y anuncia metadata menos restrictiva para minimizar confirmaciones del cliente.
+- Todas las herramientas exponen `outputSchema` en `tools/list` y devuelven `structuredContent` para facilitar parsing por modelos.
+- Si prefieres usar `.env`, deja la seccion `env` minima y coloca ahi las mismas variables.
+
+## Inicio rapido web con ngrok
+
+En Linux / macOS / WSL / Git Bash:
 
 ```bash
-cd /mnt/4tb-hdd/repo/mcp-server-local
+cd /mnt/hdd4tb/repo/mcp-server
 ./start-mcp.sh
 ```
+
+En Windows (CMD / PowerShell):
+
+```cmd
+cd \ruta\a\mcp-server
+start-mcp.cmd
+```
+
+> **Nota:** Ambos scripts verifican la presencia de Node.js e instalan dependencias automáticamente con `npm install` si el proyecto las requiere y no están instaladas en `node_modules`.
 
 El script levanta el servidor HTTP, abre un tunel ngrok y muestra algo como:
 
 ```text
 ChatGPT Web:   https://abc123.ngrok-free.app/mcp
 Claude Web:    https://abc123.ngrok-free.app/sse
-Claude local:  node /mnt/4tb-hdd/repo/mcp-server-local/mcp-server.js --stdio
-Allowed paths: /mnt/4tb-hdd/repo
+Local stdio:   node /mnt/hdd4tb/repo/mcp-server/mcp-server.js --stdio
+Allowed paths: /mnt/hdd4tb/repo
 Activity log:  activity.log
 ```
 
-Deja esa terminal abierta. `Ctrl+C` detiene Node y ngrok.
+Deja esa terminal abierta. `Ctrl+C` detiene Node y ngrok. Para clientes locales no uses este script: usa `stdio` para arranque bajo demanda.
 
 ## Registro de actividad
 
@@ -41,14 +90,27 @@ El registro incluye herramienta, ruta/comando, estado, duracion y tamanos aproxi
 Puedes usar variables de entorno o `.env`:
 
 ```bash
-ALLOWED_PATHS=/mnt/4tb-hdd/repo,/tmp/mcp-test
-WORKING_DIR=/mnt/4tb-hdd/repo
+ALLOWED_PATHS=/mnt/hdd4tb/repo,/tmp/mcp-test
+MCP_FULL_ACCESS=1
+WORKING_DIR=/mnt/hdd4tb/repo
 PORT=3000
 HOST=127.0.0.1
 ACTIVITY_LOG=activity.log
+MCP_FAST_MODE=1
+SEARCH_CACHE_TTL_MS=60000
+SEARCH_MAX_FILE_BYTES=524288
+SEARCH_MAX_TOTAL_BYTES=16777216
+SEARCH_SKIP_DIRS=node_modules,.git,dist,build,.next,.nuxt,.cache,coverage,.venv,venv,__pycache__,target,out
+READ_BATCH_LIMIT=25
+SSE_HEARTBEAT_MS=15000
+KEEP_ALIVE_TIMEOUT_MS=65000
 ```
 
-Las rutas relativas que reciba la IA se resuelven contra la primera carpeta de `ALLOWED_PATHS`. Las rutas absolutas solo funcionan si estan dentro de alguna carpeta permitida.
+Con `MCP_FULL_ACCESS=1`, las rutas relativas se resuelven contra `WORKING_DIR` (o `cwd`) y tambien se permiten rutas absolutas fuera de `ALLOWED_PATHS`.
+
+Con `MCP_FULL_ACCESS=0`, las rutas relativas se resuelven contra la primera carpeta de `ALLOWED_PATHS` y las rutas absolutas solo funcionan si estan dentro de alguna carpeta permitida.
+
+Si no defines `WORKING_DIR`, el servidor usa por defecto la carpeta padre del proyecto `mcp-server`, y si `ALLOWED_PATHS` apunta a rutas inexistentes ahora falla al arrancar con un error explicito en vez de quedar respondiendo con errores `ENOENT` en cada herramienta.
 
 ## ChatGPT Web
 
@@ -91,30 +153,7 @@ https://TU-NGROK.ngrok-free.app/mcp
 
 ## Claude Desktop o clientes MCP locales
 
-Usa el transporte stdio:
-
-```json
-{
-  "mcpServers": {
-    "local-files": {
-      "command": "node",
-      "args": [
-        "/mnt/4tb-hdd/repo/mcp-server-local/mcp-server.js",
-        "--stdio"
-      ],
-      "env": {
-        "ALLOWED_PATHS": "/mnt/4tb-hdd/repo"
-      }
-    }
-  }
-}
-```
-
-Tambien puedes ejecutar:
-
-```bash
-./start-mcp-real.sh
-```
+Usa la configuracion `stdio` de la seccion **Uso local recomendado: stdio bajo demanda**. Ese modo hace que el cliente arranque el MCP solo cuando lo necesita, sin dejar un servidor HTTP permanente.
 
 ## Herramientas disponibles
 
@@ -124,13 +163,17 @@ Tambien puedes ejecutar:
 - `read_file`: lee archivos UTF-8.
 - `write_file`: escribe o agrega contenido en archivos UTF-8.
 - `patch_file`: aplica reemplazos exactos `search/replace` sobre archivos UTF-8.
-- `run_command`: ejecuta comandos locales con `cwd` validado dentro de `ALLOWED_PATHS`.
+- `run_command`: ejecuta comandos locales; con `MCP_FULL_ACCESS=0` valida `cwd` dentro de `ALLOWED_PATHS`.
 
 ## Seguridad
 
-El servidor nunca permite acceder fuera de `ALLOWED_PATHS`. No expongas carpetas sensibles.
+Con `MCP_FULL_ACCESS=1` el servidor permite acceso local completo al filesystem. Usalo solo cuando controles el proceso y el cliente.
+
+Con `MCP_FULL_ACCESS=0`, el servidor nunca permite acceder fuera de `ALLOWED_PATHS`.
 
 `run_command` puede ejecutar procesos locales. Por defecto no usa shell y recibe `command` + `args`; si habilitas `shell: true`, tratalo como acceso completo a tu usuario del sistema dentro del contexto permitido.
+
+Las herramientas de lectura se anuncian como `readOnlyHint`, pero eso no reemplaza la politica del cliente: las herramientas que escriben o ejecutan comandos pueden seguir requiriendo aprobacion.
 
 Opcionalmente puedes exigir bearer token en HTTP:
 

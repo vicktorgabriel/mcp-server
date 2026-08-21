@@ -9,7 +9,8 @@
     "start": "node mcp-server.js --http",
     "stdio": "node mcp-server.js --stdio",
     "dev": "node --watch mcp-server.js --http",
-    "tunnel": "./start-mcp.sh"
+    "tunnel": "./start-mcp.sh",
+    "tunnel:win": "start-mcp.cmd"
   },
   "keywords": ["mcp", "model-context-protocol", "filesystem", "chatgpt", "claude"],
   "author": "",

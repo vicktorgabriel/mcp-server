@@ -3,6 +3,26 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# 1. Verificar si Node.js esta instalado
+if ! command -v node >/dev/null 2>&1; then
+  echo "Error: Node.js is not installed or not in PATH."
+  echo "Please install Node.js (https://nodejs.org/) and try again."
+  exit 1
+fi
+
+# 2. Verificar dependencias e instalarlas si se requieren y faltan
+if ! node -e "const fs=require('fs'), path=require('path'); const pkgPath=path.join(process.cwd(),'package.json'); if(!fs.existsSync(pkgPath)) process.exit(0); const pkg=JSON.parse(fs.readFileSync(pkgPath,'utf8')); const deps=Object.keys(pkg.dependencies||{}); if(deps.length>0 && (!fs.existsSync(path.join(process.cwd(),'node_modules')) || !deps.every(d=>{try{require.resolve(d,{paths:[process.cwd()]}); return true;}catch(e){return false;}}))) process.exit(1);" 2>/dev/null; then
+  echo "Dependencies are missing or required. Running npm install..."
+  if command -v npm >/dev/null 2>&1; then
+    npm install
+  else
+    echo "Error: npm is not installed or not in PATH to install dependencies."
+    exit 1
+  fi
+fi
+
+DEFAULT_ALLOWED_PATHS="$(cd .. && pwd)"
+
 read_config() {
   local key="$1"
   local fallback="$2"
@@ -11,7 +31,8 @@ read_config() {
 
 PORT="$(read_config PORT 3000)"
 HOST="$(read_config HOST 127.0.0.1)"
-ALLOWED_PATHS="$(read_config ALLOWED_PATHS /mnt/4tb-hdd/repo)"
+ALLOWED_PATHS="$(read_config ALLOWED_PATHS "$DEFAULT_ALLOWED_PATHS")"
+MCP_FULL_ACCESS="$(read_config MCP_FULL_ACCESS 1)"
 MCP_AUTH_TOKEN="$(read_config MCP_AUTH_TOKEN '')"
 ACTIVITY_LOG="$(read_config ACTIVITY_LOG activity.log)"
 MCP_FAST_MODE="$(read_config MCP_FAST_MODE 1)"
@@ -22,7 +43,7 @@ SEARCH_SKIP_DIRS="$(read_config SEARCH_SKIP_DIRS node_modules,.git,dist,build,.n
 READ_BATCH_LIMIT="$(read_config READ_BATCH_LIMIT 25)"
 SSE_HEARTBEAT_MS="$(read_config SSE_HEARTBEAT_MS 15000)"
 KEEP_ALIVE_TIMEOUT_MS="$(read_config KEEP_ALIVE_TIMEOUT_MS 65000)"
-export PORT HOST ALLOWED_PATHS MCP_AUTH_TOKEN ACTIVITY_LOG MCP_FAST_MODE SEARCH_CACHE_TTL_MS SEARCH_MAX_FILE_BYTES SEARCH_MAX_TOTAL_BYTES SEARCH_SKIP_DIRS READ_BATCH_LIMIT SSE_HEARTBEAT_MS KEEP_ALIVE_TIMEOUT_MS
+export PORT HOST ALLOWED_PATHS MCP_FULL_ACCESS MCP_AUTH_TOKEN ACTIVITY_LOG MCP_FAST_MODE SEARCH_CACHE_TTL_MS SEARCH_MAX_FILE_BYTES SEARCH_MAX_TOTAL_BYTES SEARCH_SKIP_DIRS READ_BATCH_LIMIT SSE_HEARTBEAT_MS KEEP_ALIVE_TIMEOUT_MS
 
 SERVER_LOG="${SERVER_LOG:-mcp-server.log}"
 NGROK_LOG="${NGROK_LOG:-ngrok.log}"
@@ -74,8 +95,9 @@ echo "Local health:  http://${HOST}:${PORT}/health"
 echo "Local config:  http://${HOST}:${PORT}/config"
 echo "ChatGPT Web:   ${BASE_URL}/mcp"
 echo "Claude Web:    ${BASE_URL}/sse"
-echo "Claude local:  node $(pwd)/mcp-server.js --stdio"
+echo "Local stdio:   node $(pwd)/mcp-server.js --stdio"
 echo "Allowed paths: ${ALLOWED_PATHS}"
+echo "Full access:   ${MCP_FULL_ACCESS}"
 echo "Fast mode:     ${MCP_FAST_MODE}"
 echo "Activity log:  ${ACTIVITY_LOG}"
 if [ -n "${MCP_AUTH_TOKEN:-}" ]; then
@@ -90,5 +112,6 @@ fi
 echo "================="
 echo ""
 echo "Leave this terminal open. Press Ctrl+C to stop MCP and ngrok."
+echo "For local clients, prefer stdio so MCP starts only when the client needs it."
 
 wait "$SERVER_PID"

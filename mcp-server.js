@@ -20,12 +20,37 @@ loadDotEnv();
 
 const JSONRPC_VERSION = '2.0';
 const MCP_VERSION = process.env.MCP_PROTOCOL_VERSION || '2025-11-25';
-const DEFAULT_ROOT = process.env.WORKING_DIR || '/mnt/4tb-hdd/repo';
-const ALLOWED_ROOTS = parseAllowedRoots(process.env.ALLOWED_PATHS || DEFAULT_ROOT);
+const FULL_ACCESS = parseBoolean(process.env.MCP_FULL_ACCESS, true);
+const DEFAULT_ROOT = process.env.WORKING_DIR || inferDefaultRoot();
+const ALLOWED_ROOTS = FULL_ACCESS ? [path.resolve('/')] : parseAllowedRoots(process.env.ALLOWED_PATHS || DEFAULT_ROOT);
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || '';
 const ACTIVITY_LOG = process.env.ACTIVITY_LOG || '';
+const DEFAULT_SEARCH_SKIP_DIRS = 'node_modules,.git';
+const FAST_MODE = parseBoolean(process.env.MCP_FAST_MODE, false);
+const SEARCH_CACHE_TTL_MS = parseNumber(process.env.SEARCH_CACHE_TTL_MS, FAST_MODE ? 60_000 : 0, { min: 0 });
+const SEARCH_MAX_FILE_BYTES = parseNumber(
+  process.env.SEARCH_MAX_FILE_BYTES,
+  FAST_MODE ? 512 * 1024 : Number.MAX_SAFE_INTEGER,
+  { min: 1 }
+);
+const SEARCH_MAX_TOTAL_BYTES = parseNumber(
+  process.env.SEARCH_MAX_TOTAL_BYTES,
+  FAST_MODE ? 16 * 1024 * 1024 : Number.MAX_SAFE_INTEGER,
+  { min: 1 }
+);
+const SEARCH_SKIP_DIRS = parseCsvSet(process.env.SEARCH_SKIP_DIRS || DEFAULT_SEARCH_SKIP_DIRS);
+const READ_BATCH_LIMIT = parseNumber(
+  process.env.READ_BATCH_LIMIT,
+  FAST_MODE ? 25 : Number.MAX_SAFE_INTEGER,
+  { min: 1 }
+);
+const SSE_HEARTBEAT_MS = parseNumber(process.env.SSE_HEARTBEAT_MS, 30_000, { min: 1_000 });
+const KEEP_ALIVE_TIMEOUT_MS = parseNumber(process.env.KEEP_ALIVE_TIMEOUT_MS, 0, { min: 0 });
+const searchCache = new Map();
+
+if (!FULL_ACCESS) validateAllowedRoots(ALLOWED_ROOTS);
 
 class Logger {
   static info(message) {
@@ -62,6 +87,25 @@ function parseAllowedRoots(value) {
     .map((item) => path.resolve(item));
 }
 
+function inferDefaultRoot() {
+  return path.resolve(__dirname, '..');
+}
+
+function validateAllowedRoots(roots) {
+  if (!Array.isArray(roots) || roots.length === 0) {
+    throw new Error('ALLOWED_PATHS resolved to no directories');
+  }
+
+  for (const root of roots) {
+    if (!fs.existsSync(root)) {
+      throw new Error(`Allowed root does not exist: ${root}`);
+    }
+    if (!fs.statSync(root).isDirectory()) {
+      throw new Error(`Allowed root is not a directory: ${root}`);
+    }
+  }
+}
+
 function loadDotEnv() {
   const envPath = path.join(__dirname, '.env');
   if (!fs.existsSync(envPath)) return;
@@ -83,7 +127,110 @@ function loadDotEnv() {
 }
 
 function rootForDisplay() {
+  if (FULL_ACCESS) return 'FULL_ACCESS (/)';
   return ALLOWED_ROOTS.join(', ');
+}
+
+function parseBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  switch (String(value).trim().toLowerCase()) {
+    case '1':
+    case 'true':
+    case 'yes':
+    case 'on':
+      return true;
+    case '0':
+    case 'false':
+    case 'no':
+    case 'off':
+      return false;
+    default:
+      return fallback;
+  }
+}
+
+function parseNumber(value, fallback, { min = -Infinity, max = Infinity } = {}) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(max, Math.max(min, numeric));
+}
+
+function parseCsvSet(value) {
+  return new Set(
+    String(value || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+  );
+}
+
+function buildToolMetadata(title, annotations) {
+  return {
+    title,
+    annotations: {
+      title,
+      ...toolAnnotations(annotations)
+    }
+  };
+}
+
+function toolAnnotations(annotations = {}) {
+  if (!FULL_ACCESS) return annotations;
+  const next = { ...annotations };
+
+  if (Object.prototype.hasOwnProperty.call(next, 'destructiveHint')) next.destructiveHint = false;
+  if (Object.prototype.hasOwnProperty.call(next, 'idempotentHint')) next.idempotentHint = true;
+  next.openWorldHint = true;
+
+  return next;
+}
+
+function envValue(name, fallback) {
+  const value = process.env[name];
+  return value === undefined || value === '' ? String(fallback) : String(value);
+}
+
+function recommendedStdioEnv() {
+  return {
+    MCP_FULL_ACCESS: envValue('MCP_FULL_ACCESS', 1),
+    ALLOWED_PATHS: rootForDisplay(),
+    WORKING_DIR: envValue('WORKING_DIR', DEFAULT_ROOT),
+    MCP_FAST_MODE: envValue('MCP_FAST_MODE', 1),
+    SEARCH_CACHE_TTL_MS: envValue('SEARCH_CACHE_TTL_MS', 60_000),
+    SEARCH_MAX_FILE_BYTES: envValue('SEARCH_MAX_FILE_BYTES', 512 * 1024),
+    SEARCH_MAX_TOTAL_BYTES: envValue('SEARCH_MAX_TOTAL_BYTES', 16 * 1024 * 1024),
+    SEARCH_SKIP_DIRS: envValue(
+      'SEARCH_SKIP_DIRS',
+      'node_modules,.git,dist,build,.next,.nuxt,.cache,coverage,.venv,venv,__pycache__,target,out'
+    ),
+    READ_BATCH_LIMIT: envValue('READ_BATCH_LIMIT', 25),
+    SSE_HEARTBEAT_MS: envValue('SSE_HEARTBEAT_MS', 15_000),
+    KEEP_ALIVE_TIMEOUT_MS: envValue('KEEP_ALIVE_TIMEOUT_MS', 65_000)
+  };
+}
+
+function getCachedSearchResult(cacheKey) {
+  if (!cacheKey || SEARCH_CACHE_TTL_MS <= 0) return null;
+  const cached = searchCache.get(cacheKey);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    searchCache.delete(cacheKey);
+    return null;
+  }
+  return cached.result;
+}
+
+function setCachedSearchResult(cacheKey, result) {
+  if (!cacheKey || SEARCH_CACHE_TTL_MS <= 0) return;
+  searchCache.set(cacheKey, {
+    expiresAt: Date.now() + SEARCH_CACHE_TTL_MS,
+    result
+  });
+}
+
+function invalidateSearchCache() {
+  searchCache.clear();
 }
 
 function isInside(root, candidate) {
@@ -93,6 +240,15 @@ function isInside(root, candidate) {
 
 function resolvePath(userPath = '.') {
   const rawPath = String(userPath || '.');
+
+  if (FULL_ACCESS) {
+    const base = path.resolve(process.env.WORKING_DIR || process.cwd());
+    const candidate = path.isAbsolute(rawPath)
+      ? path.resolve(rawPath)
+      : path.resolve(base, rawPath);
+    return { fullPath: candidate, displayPath: candidate, root: path.resolve('/') };
+  }
+
   const candidate = path.isAbsolute(rawPath)
     ? path.resolve(rawPath)
     : path.resolve(ALLOWED_ROOTS[0], rawPath);
@@ -106,11 +262,124 @@ function resolvePath(userPath = '.') {
 }
 
 function textResult(payload) {
-  const text = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
+  const structuredContent = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? payload
+    : { value: payload };
+  const text = JSON.stringify(structuredContent, null, 2);
   return {
-    content: [{ type: 'text', text }]
+    content: [{ type: 'text', text }],
+    structuredContent
   };
 }
+
+const TOOL_OUTPUT_SCHEMAS = {
+  search: {
+    type: 'object',
+    properties: {
+      results: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            title: { type: 'string' },
+            url: { type: 'string' },
+            text: { type: 'string' }
+          },
+          required: ['id', 'title', 'url', 'text']
+        }
+      }
+    },
+    required: ['results']
+  },
+  fetch: {
+    type: 'object',
+    properties: {
+      path: { type: 'string' },
+      content: { type: 'string' },
+      size: { type: 'number' },
+      modified: { type: 'string' }
+    },
+    required: ['path', 'content', 'size', 'modified']
+  },
+  list_files: {
+    type: 'object',
+    properties: {
+      path: { type: 'string' },
+      files: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            type: { type: 'string', enum: ['file', 'directory'] },
+            path: { type: 'string' }
+          },
+          required: ['name', 'type', 'path']
+        }
+      }
+    },
+    required: ['path', 'files']
+  },
+  read_file: {
+    type: 'object',
+    properties: {
+      path: { type: 'string' },
+      content: { type: 'string' },
+      size: { type: 'number' },
+      modified: { type: 'string' }
+    },
+    required: ['path', 'content', 'size', 'modified']
+  },
+  write_file: {
+    type: 'object',
+    properties: {
+      path: { type: 'string' },
+      bytes_written: { type: 'number' },
+      mode: { type: 'string', enum: ['write', 'append'] },
+      size: { type: 'number' },
+      modified: { type: 'string' }
+    },
+    required: ['path', 'bytes_written', 'mode', 'size', 'modified']
+  },
+  patch_file: {
+    type: 'object',
+    properties: {
+      path: { type: 'string' },
+      patches_applied: { type: 'number' },
+      replacements: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            searchBytes: { type: 'number' },
+            replaceBytes: { type: 'number' },
+            occurrences: { type: 'number' }
+          },
+          required: ['searchBytes', 'replaceBytes', 'occurrences']
+        }
+      },
+      size: { type: 'number' },
+      modified: { type: 'string' }
+    },
+    required: ['path', 'patches_applied', 'replacements', 'size', 'modified']
+  },
+  run_command: {
+    type: 'object',
+    properties: {
+      command: { type: 'string' },
+      args: { type: 'array', items: { type: 'string' } },
+      cwd: { type: 'string' },
+      shell: { type: 'boolean' },
+      exit_code: { type: ['number', 'null'] },
+      signal: { type: ['string', 'null'] },
+      timed_out: { type: 'boolean' },
+      stdout: { type: 'string' },
+      stderr: { type: 'string' }
+    },
+    required: ['command', 'args', 'cwd', 'shell', 'exit_code', 'signal', 'timed_out', 'stdout', 'stderr']
+  }
+};
 
 function createResponse(id, result) {
   return { jsonrpc: JSONRPC_VERSION, id, result };
@@ -177,6 +446,10 @@ class MCPFileServer {
     return [
       {
         name: 'search',
+        ...buildToolMetadata('Search Files', {
+          readOnlyHint: true,
+          openWorldHint: false
+        }),
         description: 'Searches readable files by filename and text content under the allowed folders.',
         inputSchema: {
           type: 'object',
@@ -186,10 +459,15 @@ class MCPFileServer {
             limit: { type: 'number', description: 'Maximum result count. Default 20.' }
           },
           required: ['query']
-        }
+        },
+        outputSchema: TOOL_OUTPUT_SCHEMAS.search
       },
       {
         name: 'fetch',
+        ...buildToolMetadata('Fetch Search Result', {
+          readOnlyHint: true,
+          openWorldHint: false
+        }),
         description: 'Fetches a file returned by search, using its id or path.',
         inputSchema: {
           type: 'object',
@@ -197,10 +475,15 @@ class MCPFileServer {
             id: { type: 'string', description: 'File id or path returned by search.' }
           },
           required: ['id']
-        }
+        },
+        outputSchema: TOOL_OUTPUT_SCHEMAS.fetch
       },
       {
         name: 'list_files',
+        ...buildToolMetadata('List Files', {
+          readOnlyHint: true,
+          openWorldHint: false
+        }),
         description: 'Lists files and directories in a path under the allowed folders.',
         inputSchema: {
           type: 'object',
@@ -208,10 +491,15 @@ class MCPFileServer {
             path: { type: 'string', description: 'Relative or allowed absolute path. Default ".".' }
           },
           required: []
-        }
+        },
+        outputSchema: TOOL_OUTPUT_SCHEMAS.list_files
       },
       {
         name: 'read_file',
+        ...buildToolMetadata('Read File', {
+          readOnlyHint: true,
+          openWorldHint: false
+        }),
         description: 'Reads a UTF-8 text file under the allowed folders.',
         inputSchema: {
           type: 'object',
@@ -219,10 +507,16 @@ class MCPFileServer {
             path: { type: 'string', description: 'Relative or allowed absolute file path.' }
           },
           required: ['path']
-        }
+        },
+        outputSchema: TOOL_OUTPUT_SCHEMAS.read_file
       },
       {
         name: 'write_file',
+        ...buildToolMetadata('Write File', {
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false
+        }),
         description: 'Writes a UTF-8 text file under the allowed folders. Creates parent directories when needed.',
         inputSchema: {
           type: 'object',
@@ -237,10 +531,16 @@ class MCPFileServer {
             }
           },
           required: ['path', 'content']
-        }
+        },
+        outputSchema: TOOL_OUTPUT_SCHEMAS.write_file
       },
       {
         name: 'patch_file',
+        ...buildToolMetadata('Patch File', {
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false
+        }),
         description: 'Patches a UTF-8 text file with exact search/replace edits under the allowed folders.',
         inputSchema: {
           type: 'object',
@@ -261,10 +561,16 @@ class MCPFileServer {
             }
           },
           required: ['path', 'patches']
-        }
+        },
+        outputSchema: TOOL_OUTPUT_SCHEMAS.patch_file
       },
       {
         name: 'run_command',
+        ...buildToolMetadata('Run Command', {
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true
+        }),
         description: 'Runs a local command in an allowed folder. Uses argv execution by default, not a shell.',
         inputSchema: {
           type: 'object',
@@ -280,7 +586,8 @@ class MCPFileServer {
             shell: { type: 'boolean', description: 'Run through the system shell. Default false.' }
           },
           required: ['command']
-        }
+        },
+        outputSchema: TOOL_OUTPUT_SCHEMAS.run_command
       }
     ];
   }
@@ -288,7 +595,7 @@ class MCPFileServer {
   initialize() {
     return {
       protocolVersion: MCP_VERSION,
-      capabilities: { tools: {} },
+      capabilities: { tools: { listChanged: false } },
       serverInfo: {
         name: 'mcp-local-files',
         version: '2.0.0'
@@ -423,6 +730,7 @@ class MCPFileServer {
     }
 
     const stats = fs.statSync(fullPath);
+    invalidateSearchCache();
     return {
       path: displayPath,
       bytes_written: Buffer.byteLength(content, 'utf8'),
@@ -482,6 +790,7 @@ class MCPFileServer {
       throw err;
     }
     const nextStats = fs.statSync(fullPath);
+    invalidateSearchCache();
 
     return {
       path: displayPath,
@@ -537,6 +846,7 @@ class MCPFileServer {
 
       child.on('close', (code, signal) => {
         clearTimeout(timer);
+        invalidateSearchCache();
         resolve({
           command,
           args: commandArgs,
@@ -563,7 +873,13 @@ class MCPFileServer {
 
     const limit = Math.max(1, Math.min(Number(args.limit || 20), 100));
     const start = resolvePath(args.path || '.').fullPath;
+    const cacheKey = `${start}\u0000${query}\u0000${limit}`;
+    const cached = getCachedSearchResult(cacheKey);
+    if (cached) return cached;
+
     const results = [];
+    let scannedContentFiles = 0;
+    let scannedContentBytes = 0;
 
     this.walkFiles(start, (filePath) => {
       if (results.length >= limit) return false;
@@ -572,12 +888,17 @@ class MCPFileServer {
       let matched = rel.toLowerCase().includes(query);
       let snippet = '';
 
-      if (!matched && this.isProbablyText(filePath)) {
-        const content = fs.readFileSync(filePath, 'utf8');
-        const index = content.toLowerCase().indexOf(query);
-        if (index >= 0) {
-          matched = true;
-          snippet = content.slice(Math.max(0, index - 120), Math.min(content.length, index + query.length + 120));
+      if (!matched && this.isProbablyText(filePath) && scannedContentFiles < READ_BATCH_LIMIT) {
+        const stats = fs.statSync(filePath);
+        if (stats.size <= SEARCH_MAX_FILE_BYTES && (scannedContentBytes + stats.size) <= SEARCH_MAX_TOTAL_BYTES) {
+          scannedContentFiles += 1;
+          scannedContentBytes += stats.size;
+          const content = fs.readFileSync(filePath, 'utf8');
+          const index = content.toLowerCase().indexOf(query);
+          if (index >= 0) {
+            matched = true;
+            snippet = content.slice(Math.max(0, index - 120), Math.min(content.length, index + query.length + 120));
+          }
         }
       }
 
@@ -593,7 +914,9 @@ class MCPFileServer {
       return true;
     });
 
-    return { results };
+    const payload = { results };
+    setCachedSearchResult(cacheKey, payload);
+    return payload;
   }
 
   walkFiles(start, visit) {
@@ -605,7 +928,7 @@ class MCPFileServer {
     }
 
     for (const entry of fs.readdirSync(start, { withFileTypes: true })) {
-      if (entry.name === 'node_modules' || entry.name === '.git') continue;
+      if (entry.isDirectory() && SEARCH_SKIP_DIRS.has(entry.name)) continue;
       const child = path.join(start, entry.name);
       if (entry.isDirectory()) {
         if (this.walkFiles(child, visit)) return true;
@@ -618,6 +941,7 @@ class MCPFileServer {
   }
 
   relativeDisplayPath(filePath) {
+    if (FULL_ACCESS) return path.resolve(filePath);
     const root = ALLOWED_ROOTS.find((allowedRoot) => isInside(allowedRoot, filePath)) || ALLOWED_ROOTS[0];
     return path.relative(root, filePath) || '.';
   }
@@ -699,7 +1023,9 @@ function startHttp() {
           ok: true,
           transport: ['streamable-http', 'sse'],
           allowedRoots: ALLOWED_ROOTS,
-          auth: AUTH_TOKEN ? 'bearer' : 'none'
+          auth: AUTH_TOKEN ? 'bearer' : 'none',
+          fastMode: FAST_MODE,
+          fullAccess: FULL_ACCESS
         });
         return;
       }
@@ -750,7 +1076,7 @@ function startHttp() {
           } else {
             writeSse(res, 'ping', '');
           }
-        }, 30_000);
+        }, SSE_HEARTBEAT_MS);
 
         req.on('close', () => {
           sessions.delete(sessionId);
@@ -779,6 +1105,11 @@ function startHttp() {
       sendJson(res, 500, { error: error.message });
     }
   });
+
+  if (KEEP_ALIVE_TIMEOUT_MS > 0) {
+    server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
+    server.headersTimeout = KEEP_ALIVE_TIMEOUT_MS + 5_000;
+  }
 
   server.listen(PORT, HOST, () => {
     Logger.info(`MCP HTTP server listening at http://${HOST}:${PORT}`);
@@ -835,27 +1166,32 @@ function readJsonBody(req) {
 }
 
 function buildClientConfig(baseUrl) {
+  const stdioConfig = {
+    transport: 'stdio',
+    startup: 'On demand; the MCP client launches the server only when a tool is used.',
+    command: 'node',
+    args: [path.join(__dirname, 'mcp-server.js'), '--stdio'],
+    env: recommendedStdioEnv(),
+    note: 'Recommended for local clients to avoid a permanently running MCP HTTP process.'
+  };
+
   return {
     chatgpt: {
       name: 'Local Files MCP',
       url: `${baseUrl}/mcp`,
       transport: 'Streamable HTTP',
       auth: AUTH_TOKEN ? 'Bearer token' : 'No authentication',
-      note: 'Enable ChatGPT Developer Mode to use write_file and other non search/fetch tools.'
+      note: 'Use HTTP only for remote/web clients. This mode keeps the server running while exposed.'
     },
     claudeWeb: {
       name: 'Local Files MCP',
       url: `${baseUrl}/sse`,
       transport: 'SSE',
-      auth: AUTH_TOKEN ? 'Bearer token' : 'No authentication'
+      auth: AUTH_TOKEN ? 'Bearer token' : 'No authentication',
+      note: 'Use SSE/HTTP only when you need a remote web connector.'
     },
-    claudeDesktop: {
-      command: 'node',
-      args: [path.join(__dirname, 'mcp-server.js'), '--stdio'],
-      env: {
-        ALLOWED_PATHS: rootForDisplay()
-      }
-    },
+    claudeDesktop: stdioConfig,
+    localRecommended: stdioConfig,
     allowedRoots: ALLOWED_ROOTS,
     tools: [
       'search',
@@ -866,6 +1202,7 @@ function buildClientConfig(baseUrl) {
       'patch_file',
       'run_command'
     ],
+    fullAccess: FULL_ACCESS,
     bearerToken: AUTH_TOKEN || undefined
   };
 }
@@ -876,7 +1213,8 @@ function printConfig(baseUrl) {
   console.error('=== MCP CLIENT CONFIG ===');
   console.error(`ChatGPT Web URL: ${config.chatgpt.url}`);
   console.error(`Claude Web URL:  ${config.claudeWeb.url}`);
-  console.error(`Claude Desktop:  node ${path.join(__dirname, 'mcp-server.js')} --stdio`);
+  console.error(`Local stdio:     node ${path.join(__dirname, 'mcp-server.js')} --stdio`);
+  console.error('Recommendation:  use stdio for local clients so MCP starts only on demand.');
   if (AUTH_TOKEN) console.error(`Bearer token:    ${AUTH_TOKEN}`);
   console.error(`Allowed roots:   ${rootForDisplay()}`);
   console.error('=========================');
