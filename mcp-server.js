@@ -15,6 +15,7 @@ const http = require('http');
 const path = require('path');
 const readline = require('readline');
 const { URL } = require('url');
+const { createFullControl } = require('./full-control-tools');
 
 loadDotEnv();
 
@@ -205,6 +206,10 @@ function recommendedStdioEnv() {
       'node_modules,.git,dist,build,.next,.nuxt,.cache,coverage,.venv,venv,__pycache__,target,out'
     ),
     READ_BATCH_LIMIT: envValue('READ_BATCH_LIMIT', 25),
+    MCP_DESKTOP_ENABLED: envValue('MCP_DESKTOP_ENABLED', 1),
+    MCP_INPUT_ENABLED: envValue('MCP_INPUT_ENABLED', 1),
+    MCP_CONTROL_TIMEOUT_MS: envValue('MCP_CONTROL_TIMEOUT_MS', 120_000),
+    MCP_IMAGE_LIMIT_BYTES: envValue('MCP_IMAGE_LIMIT_BYTES', 25 * 1024 * 1024),
     SSE_HEARTBEAT_MS: envValue('SSE_HEARTBEAT_MS', 15_000),
     KEEP_ALIVE_TIMEOUT_MS: envValue('KEEP_ALIVE_TIMEOUT_MS', 65_000)
   };
@@ -436,14 +441,26 @@ function summarizeToolArgs(tool, args) {
         timeoutMs: args.timeoutMs,
         shell: Boolean(args.shell)
       };
-    default:
-      return {};
+    default: {
+      const summary = {};
+      for (const key of ['path', 'repo', 'target', 'session', 'service', 'action', 'pid', 'signal', 'mode', 'device', 'filter', 'command', 'cwd']) {
+        if (args[key] !== undefined) summary[key] = args[key];
+      }
+      if (Array.isArray(args.args)) summary.args = args.args;
+      if (Array.isArray(args.keys)) summary.keys = args.keys;
+      if (typeof args.text === 'string') summary.textChars = args.text.length;
+      return summary;
+    }
   }
 }
 
 class MCPFileServer {
+  constructor() {
+    this.fullControl = createFullControl({ resolvePath, buildToolMetadata, textResult });
+  }
+
   getTools() {
-    return [
+    const baseTools = [
       {
         name: 'search',
         ...buildToolMetadata('Search Files', {
@@ -590,6 +607,7 @@ class MCPFileServer {
         outputSchema: TOOL_OUTPUT_SCHEMAS.run_command
       }
     ];
+    return [...baseTools, ...this.fullControl.tools];
   }
 
   initialize() {
@@ -597,8 +615,8 @@ class MCPFileServer {
       protocolVersion: MCP_VERSION,
       capabilities: { tools: { listChanged: false } },
       serverInfo: {
-        name: 'mcp-local-files',
-        version: '2.0.0'
+        name: 'mcp-local-control',
+        version: '3.0.0'
       }
     };
   }
@@ -669,8 +687,11 @@ class MCPFileServer {
         return textResult(this.patchFile(args.path, args.patches));
       case 'run_command':
         return textResult(await this.runCommand(args));
-      default:
+      default: {
+        const extra = await this.fullControl.callTool(name, args);
+        if (extra !== null) return extra;
         throw new Error(`Tool not found: ${name}`);
+      }
     }
   }
 
@@ -1030,6 +1051,13 @@ function startHttp() {
         return;
       }
 
+      // Health remains public for tunnel diagnostics. Everything else is
+      // protected whenever MCP_AUTH_TOKEN is configured.
+      if (!hasValidAuth(req)) {
+        sendAuthError(res);
+        return;
+      }
+
       if (url.pathname === '/config' && req.method === 'GET') {
         sendJson(res, 200, buildClientConfig(publicBaseUrl(req)));
         return;
@@ -1037,11 +1065,6 @@ function startHttp() {
 
       if (url.pathname === '/tools' && req.method === 'GET') {
         sendJson(res, 200, { tools: mcp.getTools() });
-        return;
-      }
-
-      if (!hasValidAuth(req)) {
-        sendAuthError(res);
         return;
       }
 
@@ -1177,14 +1200,14 @@ function buildClientConfig(baseUrl) {
 
   return {
     chatgpt: {
-      name: 'Local Files MCP',
+      name: 'MCP Local Full Control',
       url: `${baseUrl}/mcp`,
       transport: 'Streamable HTTP',
       auth: AUTH_TOKEN ? 'Bearer token' : 'No authentication',
       note: 'Use HTTP only for remote/web clients. This mode keeps the server running while exposed.'
     },
     claudeWeb: {
-      name: 'Local Files MCP',
+      name: 'MCP Local Full Control',
       url: `${baseUrl}/sse`,
       transport: 'SSE',
       auth: AUTH_TOKEN ? 'Bearer token' : 'No authentication',
@@ -1193,17 +1216,9 @@ function buildClientConfig(baseUrl) {
     claudeDesktop: stdioConfig,
     localRecommended: stdioConfig,
     allowedRoots: ALLOWED_ROOTS,
-    tools: [
-      'search',
-      'fetch',
-      'list_files',
-      'read_file',
-      'write_file',
-      'patch_file',
-      'run_command'
-    ],
+    tools: new MCPFileServer().getTools().map((tool) => tool.name),
     fullAccess: FULL_ACCESS,
-    bearerToken: AUTH_TOKEN || undefined
+    bearerTokenConfigured: Boolean(AUTH_TOKEN)
   };
 }
 
@@ -1215,7 +1230,7 @@ function printConfig(baseUrl) {
   console.error(`Claude Web URL:  ${config.claudeWeb.url}`);
   console.error(`Local stdio:     node ${path.join(__dirname, 'mcp-server.js')} --stdio`);
   console.error('Recommendation:  use stdio for local clients so MCP starts only on demand.');
-  if (AUTH_TOKEN) console.error(`Bearer token:    ${AUTH_TOKEN}`);
+  if (AUTH_TOKEN) console.error('Bearer token:    configured (value hidden)');
   console.error(`Allowed roots:   ${rootForDisplay()}`);
   console.error('=========================');
   console.error('');

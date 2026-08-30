@@ -88,7 +88,7 @@ echo Full access:   %MCP_FULL_ACCESS%
 echo Fast mode:     %MCP_FAST_MODE%
 echo Activity log:  %ACTIVITY_LOG%
 if defined MCP_AUTH_TOKEN if not "%MCP_AUTH_TOKEN%"=="" (
-    echo Auth:          Bearer %MCP_AUTH_TOKEN%
+    echo Auth:          Bearer configured ^(value hidden^)
 ) else (
     echo Auth:          none
 )

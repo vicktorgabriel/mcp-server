@@ -1,214 +1,338 @@
-# MCP Server Local
+# MCP Local Full Control
 
-Servidor MCP para exponer carpetas locales a clientes IA con permisos de lectura y escritura; por defecto en este repo corre en modo de acceso completo (`MCP_FULL_ACCESS=1`).
+Servidor MCP local para dar a ChatGPT, Codex, Claude u otros clientes MCP acceso controlado al equipo del usuario. La version 3 amplía el servidor original de archivos con herramientas de sistema, Git, `tmux`, escritorio, captura de pantalla, mouse/teclado, cámara y audio.
 
-Soporta dos modos:
+El objetivo principal de este repo es permitir un flujo de trabajo como este:
 
-- `stdio`: recomendado para clientes locales. El cliente MCP levanta el proceso solo cuando necesita usar una herramienta.
-- `HTTP/SSE`: para clientes web como ChatGPT Web y Claude Web, normalmente publicado con ngrok. Este modo deja el servidor corriendo mientras esta expuesto.
-
-## Uso local recomendado: stdio bajo demanda
-
-Para uso local, configura el cliente MCP para ejecutar el servidor por `stdio`. Asi evitas mantener un proceso HTTP abierto y, en clientes compatibles, reduces aprobaciones repetitivas en herramientas de solo lectura porque el servidor ahora las anuncia con metadata `readOnly`.
-
-```json
-{
-  "mcpServers": {
-    "local-files": {
-      "command": "node",
-      "args": [
-        "/mnt/hdd4tb/repo/mcp-server/mcp-server.js",
-        "--stdio"
-      ],
-      "env": {
-        "ALLOWED_PATHS": "/mnt/hdd4tb/repo",
-        "MCP_FULL_ACCESS": "1",
-        "WORKING_DIR": "/mnt/hdd4tb/repo",
-        "MCP_FAST_MODE": "1",
-        "SEARCH_CACHE_TTL_MS": "60000",
-        "SEARCH_MAX_FILE_BYTES": "524288",
-        "SEARCH_MAX_TOTAL_BYTES": "16777216",
-        "SEARCH_SKIP_DIRS": "node_modules,.git,dist,build,.next,.nuxt,.cache,coverage,.venv,venv,__pycache__,target,out",
-        "READ_BATCH_LIMIT": "25",
-        "SSE_HEARTBEAT_MS": "15000",
-        "KEEP_ALIVE_TIMEOUT_MS": "65000"
-      }
-    }
-  }
-}
+```text
+ChatGPT / Chief
+  ├─ inspecciona repos, logs, procesos, pantalla y estado del sistema
+  ├─ decide prioridades y audita resultados
+  └─ supervisa sesiones tmux
+        ├─ Codex CLI / proyecto A
+        ├─ Codex CLI / proyecto B
+        └─ otros workers
 ```
 
-Notas:
+Todas las acciones se ejecutan con los permisos del usuario que inicia el MCP. `MCP_FULL_ACCESS=1` elimina la restricción de rutas del propio servidor, pero **no** salta permisos de Linux, `sudo`, ACLs o permisos de dispositivos.
 
-- `search`, `fetch`, `list_files` y `read_file` se anuncian como herramientas de solo lectura.
-- Con `MCP_FULL_ACCESS=1` (valor recomendado en este repo), el servidor habilita acceso completo local y anuncia metadata menos restrictiva para minimizar confirmaciones del cliente.
-- Todas las herramientas exponen `outputSchema` en `tools/list` y devuelven `structuredContent` para facilitar parsing por modelos.
-- Si prefieres usar `.env`, deja la seccion `env` minima y coloca ahi las mismas variables.
+## Modos de transporte
 
-## Inicio rapido web con ngrok
+- `stdio`: recomendado para clientes locales. El cliente arranca el MCP bajo demanda.
+- `HTTP / Streamable HTTP`: usado por ChatGPT Web mediante un túnel como ngrok.
+- `SSE`: compatibilidad con clientes web que todavía usan el transporte MCP SSE.
 
-En Linux / macOS / WSL / Git Bash:
+## Inicio rápido con ngrok
 
 ```bash
 cd /mnt/hdd4tb/repo/mcp-server
 ./start-mcp.sh
 ```
 
-En Windows (CMD / PowerShell):
-
-```cmd
-cd \ruta\a\mcp-server
-start-mcp.cmd
-```
-
-> **Nota:** Ambos scripts verifican la presencia de Node.js e instalan dependencias automáticamente con `npm install` si el proyecto las requiere y no están instaladas en `node_modules`.
-
-El script levanta el servidor HTTP, abre un tunel ngrok y muestra algo como:
+El script inicia Node en `127.0.0.1:3000`, abre el túnel ngrok y muestra la URL pública de ChatGPT:
 
 ```text
-ChatGPT Web:   https://abc123.ngrok-free.app/mcp
-Claude Web:    https://abc123.ngrok-free.app/sse
-Local stdio:   node /mnt/hdd4tb/repo/mcp-server/mcp-server.js --stdio
-Allowed paths: /mnt/hdd4tb/repo
-Activity log:  activity.log
+https://TU-TUNEL.ngrok-free.app/mcp
 ```
 
-Deja esa terminal abierta. `Ctrl+C` detiene Node y ngrok. Para clientes locales no uses este script: usa `stdio` para arranque bajo demanda.
+El MCP existe públicamente sólo mientras el script/ngrok estén levantados. `Ctrl+C` cierra ambos procesos.
 
-## Registro de actividad
-
-Cada llamada a herramientas queda registrada en el CLI con prefijo `[ACTIVITY]` y, si `ACTIVITY_LOG` esta configurado, tambien en formato JSONL:
+## Actualizar otra máquina
 
 ```bash
-tail -f activity.log
+cd /ruta/al/mcp-server
+git pull
+npm test
+./self-test.sh
+./start-mcp.sh
 ```
 
-El registro incluye herramienta, ruta/comando, estado, duracion y tamanos aproximados. No guarda contenido de archivos ni el texto completo escrito.
+`self-test.sh` comprueba sintaxis, inventario de herramientas, capacidades locales, Git, tmux y una captura de pantalla cuando existe una sesión gráfica accesible.
 
-## Configurar carpetas expuestas
+## Requisitos
 
-Puedes usar variables de entorno o `.env`:
+Base:
+
+- Node.js
+- Git
+- bash (Linux)
+- ngrok para ChatGPT Web remoto
+
+Para el conjunto completo en Linux:
+
+- `tmux`
+- `systemctl` / `journalctl`
+- `wmctrl`
+- `gnome-screenshot`, `grim` o `scrot`
+- `python3` + `python-xlib` para mouse/teclado X11
+- `ffmpeg` para cámaras V4L2
+- `pactl` o herramientas ALSA para inventario de audio
+
+En X11 el control de teclado/mouse usa `desktop-control.py` + XTEST. En Wayland la captura puede funcionar según el compositor/backend instalado, pero la inyección global de teclado/mouse puede estar restringida por el propio compositor.
+
+## Configuración
+
+Ejemplo `.env`:
 
 ```bash
-ALLOWED_PATHS=/mnt/hdd4tb/repo,/tmp/mcp-test
-MCP_FULL_ACCESS=1
-WORKING_DIR=/mnt/hdd4tb/repo
 PORT=3000
 HOST=127.0.0.1
-ACTIVITY_LOG=activity.log
+WORKING_DIR=/mnt/hdd4tb/repo
+ALLOWED_PATHS=/mnt/hdd4tb/repo
+MCP_FULL_ACCESS=1
+
 MCP_FAST_MODE=1
 SEARCH_CACHE_TTL_MS=60000
 SEARCH_MAX_FILE_BYTES=524288
 SEARCH_MAX_TOTAL_BYTES=16777216
 SEARCH_SKIP_DIRS=node_modules,.git,dist,build,.next,.nuxt,.cache,coverage,.venv,venv,__pycache__,target,out
 READ_BATCH_LIMIT=25
+
+MCP_DESKTOP_ENABLED=1
+MCP_INPUT_ENABLED=1
+MCP_CONTROL_TIMEOUT_MS=120000
+MCP_IMAGE_LIMIT_BYTES=26214400
+
 SSE_HEARTBEAT_MS=15000
 KEEP_ALIVE_TIMEOUT_MS=65000
+ACTIVITY_LOG=activity.log
+
+# Opcional para HTTP/ngrok
+MCP_AUTH_TOKEN=
 ```
 
-Con `MCP_FULL_ACCESS=1`, las rutas relativas se resuelven contra `WORKING_DIR` (o `cwd`) y tambien se permiten rutas absolutas fuera de `ALLOWED_PATHS`.
+### Acceso a archivos
 
-Con `MCP_FULL_ACCESS=0`, las rutas relativas se resuelven contra la primera carpeta de `ALLOWED_PATHS` y las rutas absolutas solo funcionan si estan dentro de alguna carpeta permitida.
-
-Si no defines `WORKING_DIR`, el servidor usa por defecto la carpeta padre del proyecto `mcp-server`, y si `ALLOWED_PATHS` apunta a rutas inexistentes ahora falla al arrancar con un error explicito en vez de quedar respondiendo con errores `ENOENT` en cada herramienta.
-
-## ChatGPT Web
-
-1. Activa Developer Mode en ChatGPT: Settings -> Connectors -> Advanced -> Developer mode.
-2. Ve a Settings -> Connectors.
-3. Agrega un conector MCP remoto/custom.
-4. Usa la URL que imprime el CLI:
-
-```text
-https://TU-NGROK.ngrok-free.app/mcp
-```
-
-5. Autenticacion: `No authentication`, salvo que configures `MCP_AUTH_TOKEN`.
-
-ChatGPT puede usar `search` y `fetch` como conector normal. Para `list_files`, `read_file` y `write_file`, usa Developer Mode porque son herramientas MCP completas, incluyendo escritura.
-
-## Browser y artifacts
-
-El servidor responde CORS para clientes web, incluyendo preflight `OPTIONS`, headers MCP y Private Network Access. Desde una pagina HTTPS como Claude/ChatGPT suele ser mas estable usar la URL HTTPS de ngrok:
-
-```text
-https://TU-NGROK.ngrok-free.app/mcp
-```
-
-Evita `http://localhost:3000` desde un artifact si el navegador lo bloquea por politicas de red local o contenido mixto.
-
-## Claude Web
-
-Si tu plan/interfaz permite servidores MCP remotos, agrega:
-
-```text
-https://TU-NGROK.ngrok-free.app/sse
-```
-
-El servidor tambien expone `/mcp` por Streamable HTTP; si Claude ofrece esa opcion, puedes usar:
-
-```text
-https://TU-NGROK.ngrok-free.app/mcp
-```
-
-## Claude Desktop o clientes MCP locales
-
-Usa la configuracion `stdio` de la seccion **Uso local recomendado: stdio bajo demanda**. Ese modo hace que el cliente arranque el MCP solo cuando lo necesita, sin dejar un servidor HTTP permanente.
-
-## Herramientas disponibles
-
-- `search`: busca archivos por nombre o contenido. Compatible con conectores ChatGPT.
-- `fetch`: lee un archivo devuelto por `search`. Compatible con conectores ChatGPT.
-- `list_files`: lista directorios.
-- `read_file`: lee archivos UTF-8.
-- `write_file`: escribe o agrega contenido en archivos UTF-8.
-- `patch_file`: aplica reemplazos exactos `search/replace` sobre archivos UTF-8.
-- `run_command`: ejecuta comandos locales; con `MCP_FULL_ACCESS=0` valida `cwd` dentro de `ALLOWED_PATHS`.
-
-## Seguridad
-
-Con `MCP_FULL_ACCESS=1` el servidor permite acceso local completo al filesystem. Usalo solo cuando controles el proceso y el cliente.
-
-Con `MCP_FULL_ACCESS=0`, el servidor nunca permite acceder fuera de `ALLOWED_PATHS`.
-
-`run_command` puede ejecutar procesos locales. Por defecto no usa shell y recibe `command` + `args`; si habilitas `shell: true`, tratalo como acceso completo a tu usuario del sistema dentro del contexto permitido.
-
-Las herramientas de lectura se anuncian como `readOnlyHint`, pero eso no reemplaza la politica del cliente: las herramientas que escriben o ejecutan comandos pueden seguir requiriendo aprobacion.
-
-Opcionalmente puedes exigir bearer token en HTTP:
+Con:
 
 ```bash
-MCP_AUTH_TOKEN="$(openssl rand -hex 24)" ./start-mcp.sh
+MCP_FULL_ACCESS=1
 ```
 
-Luego configura el cliente con:
+el servidor acepta rutas absolutas de todo el filesystem y las rutas relativas se resuelven desde `WORKING_DIR`.
+
+Con:
+
+```bash
+MCP_FULL_ACCESS=0
+```
+
+las rutas quedan limitadas a `ALLOWED_PATHS`.
+
+## Herramientas
+
+La version 3 expone actualmente 49 herramientas.
+
+### Filesystem
+
+- `search`
+- `fetch`
+- `list_files`
+- `read_file`
+- `write_file`
+- `patch_file`
+- `file_info`
+- `read_image`
+- `tail_file`
+- `run_command`
+
+`read_image` devuelve contenido MCP `image`, por lo que el modelo puede ver realmente PNG/JPEG/WebP/GIF locales en lugar de recibir sólo una ruta.
+
+### Diagnóstico y sistema
+
+- `control_capabilities`
+- `system_snapshot`
+- `hardware_info`
+- `disk_usage`
+- `network_status`
+- `gpu_status`
+- `process_list`
+- `process_info`
+- `process_signal`
+- `process_start`
+- `service_status`
+- `service_action`
+- `journal_tail`
+
+`process_start` sirve para lanzar trabajos persistentes sin depender del timeout de `run_command`; devuelve PID y archivo de log.
+
+### Git
+
+- `git_status`
+- `git_diff`
+- `git_log`
+- `git_branches`
+- `git_worktrees`
+- `git_command`
+
+`git_command` permite ejecutar cualquier subcomando Git dentro de un repo: `fetch`, `pull`, `push`, `checkout`, `commit`, `worktree`, etc.
+
+### tmux / workers
+
+- `tmux_list`
+- `tmux_panes`
+- `tmux_create`
+- `tmux_capture`
+- `tmux_send`
+- `tmux_interrupt`
+- `tmux_kill`
+
+Estas herramientas permiten que ChatGPT supervise una sesión de Codex CLI sin reemplazar su entorno local:
+
+```text
+ChatGPT
+  ↓ tmux_capture
+lee qué está haciendo Codex
+  ↓ git_diff / tests / logs
+lo audita
+  ↓ tmux_send
+le entrega la siguiente instrucción o corrección
+```
+
+Ejemplo conceptual:
+
+```text
+tmux_create(session="ailen", cwd="/repo/ailen", command="codex")
+tmux_capture(target="ailen")
+tmux_send(target="ailen", text="Auditá renderer y ejecutá los tests")
+```
+
+### Escritorio y visión
+
+- `desktop_info`
+- `screen_capture`
+- `list_windows`
+- `window_action`
+- `mouse_move`
+- `mouse_click`
+- `mouse_scroll`
+- `keyboard_hotkey`
+- `keyboard_type`
+- `desktop_open`
+
+`screen_capture` devuelve la captura como contenido MCP `image`. Modos:
+
+- `screen`: escritorio completo.
+- `active_window`: ventana activa.
+
+`window_action` soporta:
+
+- focus
+- close
+- maximize
+- unmaximize
+- minimize
+- raise
+- move_resize
+
+En Linux/X11, mouse y teclado usan `python-xlib` y XTEST, por lo que no requieren `xdotool`.
+
+### Cámara y audio
+
+- `camera_list`
+- `camera_snapshot`
+- `audio_devices`
+
+`camera_snapshot` usa `ffmpeg`/V4L2 y devuelve un frame como imagen MCP. Esto permite inspección visual de cámaras locales cuando el usuario del MCP tiene permisos sobre `/dev/video*`.
+
+## Flujo recomendado ChatGPT + Codex CLI
+
+Para proyectos grandes conviene separar roles:
+
+```text
+ChatGPT
+  = análisis, planificación, auditoría, coordinación y supervisión
+
+Codex CLI
+  = edición intensiva del repo, compilación, tests y debugging
+
+MCP
+  = acceso de ChatGPT al equipo y a las sesiones de Codex
+```
+
+Un flujo típico:
+
+1. ChatGPT usa `git_status`, `git_diff`, logs y métricas para inspeccionar el proyecto.
+2. Si ya hay un Codex trabajando, usa `tmux_capture` para leer su estado.
+3. ChatGPT determina la siguiente acción.
+4. Usa `tmux_send` para orientar al worker.
+5. Codex modifica código y ejecuta pruebas localmente.
+6. ChatGPT vuelve a auditar diff/tests/logs/pantalla.
+7. Aprueba, corrige o reasigna el trabajo.
+
+Así el contexto de estrategia puede quedar en ChatGPT mientras Codex conserva el contexto técnico del repo.
+
+## Seguridad HTTP/ngrok
+
+`GET /health` queda público para diagnóstico del túnel.
+
+Si `MCP_AUTH_TOKEN` está configurado, el resto de endpoints (`/config`, `/tools`, `/mcp`, `/sse`, `/messages`) requiere:
 
 ```text
 Authorization: Bearer <token>
 ```
 
-Si el cliente web no permite bearer tokens, deja `MCP_AUTH_TOKEN` vacio y usa solo carpetas no sensibles.
+La version 3 ya **no devuelve el token** desde `/config` ni lo imprime en claro en el log de arranque.
+
+Generar uno opcionalmente:
+
+```bash
+export MCP_AUTH_TOKEN="$(openssl rand -hex 24)"
+./start-mcp.sh
+```
+
+Si el cliente web que estés usando no soporta bearer token, puede mantenerse vacío. En ese caso la protección efectiva es que el proceso y el túnel sólo estén activos cuando vos los levantes, además de las protecciones que aplique el proveedor del túnel.
+
+### Importante sobre `MCP_FULL_ACCESS=1`
+
+Con acceso completo y `run_command`/`process_signal`/`service_action`/input de escritorio habilitados, el MCP tiene aproximadamente los mismos permisos que la cuenta Linux que lo ejecuta. No puede convertirse en root por sí solo, pero sí puede modificar archivos y procesos que pertenezcan al usuario.
+
+Cada llamada queda registrada como `[ACTIVITY]`; si `ACTIVITY_LOG` está definido también se escribe JSONL. Para herramientas que reciben texto (`tmux_send`, `keyboard_type`, escritura de archivos), el registro guarda tamaño/metadatos y no el contenido completo.
 
 ## Endpoints
 
-- `GET /health`: estado.
-- `GET /config`: configuracion sugerida para clientes.
-- `GET /tools`: diagnostico de herramientas MCP expuestas.
-- `POST /mcp`: MCP Streamable HTTP.
-- `GET /mcp`: stream SSE de Streamable HTTP.
-- `GET /sse` y `POST /messages`: transporte SSE legacy.
+- `GET /health`: estado básico; permanece público.
+- `GET /config`: configuración sugerida; requiere auth cuando hay token.
+- `GET /tools`: diagnóstico del inventario; requiere auth cuando hay token.
+- `POST /mcp`: Streamable HTTP MCP.
+- `GET /mcp`: stream compatible.
+- `GET /sse` + `POST /messages`: transporte SSE legacy.
 
-## Prueba rapida
+## Clientes locales por stdio
 
-```bash
-node mcp-server.js --http
+Ejemplo:
+
+```json
+{
+  "mcpServers": {
+    "local-control": {
+      "command": "node",
+      "args": [
+        "/mnt/hdd4tb/repo/mcp-server/mcp-server.js",
+        "--stdio"
+      ],
+      "env": {
+        "WORKING_DIR": "/mnt/hdd4tb/repo",
+        "MCP_FULL_ACCESS": "1",
+        "MCP_FAST_MODE": "1",
+        "MCP_DESKTOP_ENABLED": "1",
+        "MCP_INPUT_ENABLED": "1"
+      }
+    }
+  }
+}
 ```
 
-En otra terminal:
+## Desarrollo y pruebas
 
 ```bash
-curl -s http://127.0.0.1:3000/health
-curl -s http://127.0.0.1:3000/mcp \
-  -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+npm test
 ```
+
+Prueba funcional completa:
+
+```bash
+./self-test.sh
+```
+
+La prueba funcional no pulsa teclas ni hace clicks. Sí puede realizar una captura de pantalla y crea una sesión `tmux` temporal que elimina al finalizar.

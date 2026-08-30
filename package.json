@@ -1,11 +1,12 @@
 {
   "name": "mcp-server-local",
-  "version": "1.0.0",
-  "description": "MCP puro para exponer carpetas locales a ChatGPT Web, Claude y otros clientes MCP",
+  "version": "3.0.0",
+  "description": "MCP local full-control para ChatGPT, Codex, Claude y otros clientes MCP",
   "main": "mcp-server.js",
   "scripts": {
     "test": "npm run check",
-    "check": "node --check mcp-server.js && bash -n start-mcp.sh",
+    "check": "node --check mcp-server.js && node --check full-control-tools.js && python3 -m py_compile desktop-control.py && bash -n start-mcp.sh && bash -n self-test.sh",
+    "selftest": "./self-test.sh",
     "start": "node mcp-server.js --http",
     "stdio": "node mcp-server.js --stdio",
     "dev": "node --watch mcp-server.js --http",

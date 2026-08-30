@@ -18,3 +18,7 @@ yarn-error.log*
 .idea/
 *.swp
 *.swo
+
+__pycache__/
+*.pyc
+.mcp-process-*.log
