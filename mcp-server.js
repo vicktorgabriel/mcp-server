@@ -616,7 +616,7 @@ class MCPFileServer {
       capabilities: { tools: { listChanged: false } },
       serverInfo: {
         name: 'mcp-local-control',
-        version: '3.0.0'
+        version: '3.0.1'
       }
     };
   }

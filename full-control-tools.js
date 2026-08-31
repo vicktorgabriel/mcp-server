@@ -353,34 +353,78 @@ function createFullControl({ resolvePath, buildToolMetadata, textResult }) {
     const mode = args.mode || 'screen';
     const delay = clampInt(args.delay, 0, 0, 10);
     const output = temporaryPng('mcp-screen');
+    const failures = [];
+    const wayland = String(process.env.XDG_SESSION_TYPE || '').toLowerCase() === 'wayland' || Boolean(process.env.WAYLAND_DISPLAY);
+    const desktop = `${process.env.XDG_CURRENT_DESKTOP || ''} ${process.env.DESKTOP_SESSION || ''}`;
+    const kdeWayland = wayland && /kde|plasma/i.test(desktop);
 
-    if (await commandExists('gnome-screenshot')) {
-      const cmdArgs = [];
-      if (mode === 'active_window') cmdArgs.push('-w');
-      if (delay > 0) cmdArgs.push('-d', String(delay));
-      cmdArgs.push('-f', output);
-      await requireSuccess('gnome-screenshot', cmdArgs, { timeoutMs: (delay + 15) * 1000 });
-      return imageToolResult(output, { kind: 'screenshot', mode, backend: 'gnome-screenshot' }, true);
+    async function attempt(backend, fn) {
+      try {
+        await fn();
+        return imageToolResult(output, { kind: 'screenshot', mode, backend }, true);
+      } catch (error) {
+        failures.push(`${backend}: ${error.message}`);
+        try { fs.unlinkSync(output); } catch (_) {}
+        return null;
+      }
+    }
+
+    // KDE Plasma Wayland exposes a reliable non-interactive screenshot path via Spectacle.
+    // Prefer it there because gnome-screenshot can block waiting for GNOME-specific services.
+    if (kdeWayland && await commandExists('spectacle')) {
+      const result = await attempt('spectacle', async () => {
+        const cmdArgs = ['-b', '-n', mode === 'active_window' ? '-a' : '-f'];
+        if (delay > 0) cmdArgs.push('-d', String(delay * 1000));
+        cmdArgs.push('-o', output);
+        await requireSuccess('spectacle', cmdArgs, { timeoutMs: (delay + 20) * 1000 });
+      });
+      if (result) return result;
+    }
+
+    if (!kdeWayland && await commandExists('gnome-screenshot')) {
+      const result = await attempt('gnome-screenshot', async () => {
+        const cmdArgs = [];
+        if (mode === 'active_window') cmdArgs.push('-w');
+        if (delay > 0) cmdArgs.push('-d', String(delay));
+        cmdArgs.push('-f', output);
+        await requireSuccess('gnome-screenshot', cmdArgs, { timeoutMs: (delay + 15) * 1000 });
+      });
+      if (result) return result;
     }
 
     if (mode === 'screen' && await commandExists('grim')) {
-      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay * 1000));
-      await requireSuccess('grim', [output], { timeoutMs: 15000 });
-      return imageToolResult(output, { kind: 'screenshot', mode, backend: 'grim' }, true);
+      const result = await attempt('grim', async () => {
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay * 1000));
+        await requireSuccess('grim', [output], { timeoutMs: 15000 });
+      });
+      if (result) return result;
     }
 
     if (mode === 'screen' && await commandExists('scrot')) {
-      await requireSuccess('scrot', delay > 0 ? ['-d', String(delay), output] : [output], { timeoutMs: (delay + 15) * 1000 });
-      return imageToolResult(output, { kind: 'screenshot', mode, backend: 'scrot' }, true);
+      const result = await attempt('scrot', async () => {
+        await requireSuccess('scrot', delay > 0 ? ['-d', String(delay), output] : [output], { timeoutMs: (delay + 15) * 1000 });
+      });
+      if (result) return result;
     }
 
-    throw new Error('No supported screenshot backend found (gnome-screenshot, grim, scrot)');
+    // Spectacle is also a useful fallback on X11/KDE and other sessions where it is installed.
+    if (!kdeWayland && await commandExists('spectacle')) {
+      const result = await attempt('spectacle', async () => {
+        const cmdArgs = ['-b', '-n', mode === 'active_window' ? '-a' : '-f'];
+        if (delay > 0) cmdArgs.push('-d', String(delay * 1000));
+        cmdArgs.push('-o', output);
+        await requireSuccess('spectacle', cmdArgs, { timeoutMs: (delay + 20) * 1000 });
+      });
+      if (result) return result;
+    }
+
+    throw new Error(`No screenshot backend succeeded${failures.length ? `: ${failures.join('; ')}` : ''}`);
   }
 
   async function callTool(name, args = {}) {
     switch (name) {
       case 'control_capabilities': {
-        const commands = ['bash', 'git', 'tmux', 'systemctl', 'journalctl', 'ps', 'ip', 'ss', 'lscpu', 'lsblk', 'nvidia-smi', 'wmctrl', 'gnome-screenshot', 'grim', 'scrot', 'ffmpeg', 'v4l2-ctl', 'pactl', 'arecord', 'aplay', 'xdg-open', 'python3'];
+        const commands = ['bash', 'git', 'tmux', 'systemctl', 'journalctl', 'ps', 'ip', 'ss', 'lscpu', 'lsblk', 'nvidia-smi', 'wmctrl', 'spectacle', 'gnome-screenshot', 'grim', 'scrot', 'ffmpeg', 'v4l2-ctl', 'pactl', 'arecord', 'aplay', 'xdg-open', 'python3'];
         const available = {};
         for (const command of commands) available[command] = await commandExists(command);
         let desktopHelper = { available: false };

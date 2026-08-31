@@ -68,7 +68,7 @@ Para el conjunto completo en Linux:
 - `ffmpeg` para cámaras V4L2
 - `pactl` o herramientas ALSA para inventario de audio
 
-En X11 el control de teclado/mouse usa `desktop-control.py` + XTEST. En Wayland la captura puede funcionar según el compositor/backend instalado, pero la inyección global de teclado/mouse puede estar restringida por el propio compositor.
+En X11 el control de teclado/mouse usa `desktop-control.py` + XTEST. En KDE Plasma Wayland, `screen_capture` usa Spectacle en segundo plano y devuelve una imagen MCP; la inyección global de teclado/mouse sigue estando restringida por el compositor y las herramientas X11 sólo alcanzan ventanas XWayland.
 
 ## Configuración
 
@@ -210,7 +210,7 @@ tmux_send(target="ailen", text="Auditá renderer y ejecutá los tests")
 - `keyboard_type`
 - `desktop_open`
 
-`screen_capture` devuelve la captura como contenido MCP `image`. Modos:
+`screen_capture` devuelve la captura como contenido MCP `image` y prueba backends con fallback. En KDE Plasma Wayland prioriza Spectacle para evitar bloqueos de `gnome-screenshot`. Modos:
 
 - `screen`: escritorio completo.
 - `active_window`: ventana activa.
