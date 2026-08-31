@@ -123,6 +123,8 @@ ChatGPT Web remoto no puede acceder directamente a `127.0.0.1`; para ese caso ne
 
 ## Configurar ChatGPT
 
+> **Disponibilidad de ChatGPT:** según la documentación oficial actual de OpenAI, la compatibilidad MCP completa con acciones de escritura/modificación se está desplegando en beta para Business, Enterprise y Edu. Los usuarios Pro pueden conectar servidores MCP personalizados en Developer Mode con permisos de lectura/obtención. La disponibilidad, los permisos y los nombres de menús pueden cambiar con el producto.
+
 Con el MCP y el túnel/URL pública levantados:
 
 1. Abrí **Configuración** de ChatGPT.

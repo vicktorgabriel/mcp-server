@@ -181,6 +181,7 @@ if [ -n "$PUBLIC_URL" ]; then
   echo "  4. URL: ${PUBLIC_URL}/mcp"
   echo "  5. Autenticación: la configurada en el servidor (si corresponde)."
   echo "  6. Guardar, habilitarlo y probar control_capabilities."
+  echo "  Nota: los permisos disponibles dependen del plan/rollout de ChatGPT."
 else
   echo ""
   echo "No hay URL pública. Este modo sirve para clientes MCP locales por stdio."
