@@ -3,13 +3,32 @@ setlocal enabledelayedexpansion
 
 cd /d "%~dp0"
 
-REM 1. Verificar si Node.js esta instalado
+echo ========================================================================
+echo  MCP Local Full Control - launcher Windows
+echo ========================================================================
+echo  ngrok NO es obligatorio. Es util con CGNAT, Starlink, IP dinamica,
+echo  puertos cerrados o cuando no tenes una URL HTTPS publica propia.
+echo  Con IP publica/fija podes usar DNS + TLS + reverse proxy sin ngrok.
+echo ========================================================================
+echo.
+
+REM 1. Verificar Node.js. Si falta, intentar instalarlo con winget.
 where node >nul 2>nul
 if errorlevel 1 (
-    echo [ERROR] Node.js no esta instalado o no se encuentra en el PATH.
-    echo Por favor instala Node.js desde https://nodejs.org/ e intenta nuevamente.
-    pause
-    exit /b 1
+    where winget >nul 2>nul
+    if not errorlevel 1 (
+        echo [INFO] Node.js no esta instalado. Intentando instalar Node.js LTS con winget...
+        winget install --id OpenJS.NodeJS.LTS -e --accept-package-agreements --accept-source-agreements
+        echo [INFO] Si Node acaba de instalarse y aun no aparece en PATH, cerra esta ventana y ejecuta start-mcp.cmd nuevamente.
+    ) else (
+        echo [ERROR] Node.js no esta instalado y winget no esta disponible.
+        echo Instala Node.js LTS desde https://nodejs.org/ y vuelve a ejecutar este archivo.
+    )
+    where node >nul 2>nul
+    if errorlevel 1 (
+        pause
+        exit /b 1
+    )
 )
 
 REM 2. Verificar dependencias e instalarlas automaticamente si se requieren y faltan

@@ -1,338 +1,356 @@
 # MCP Local Full Control
 
-Servidor MCP local para dar a ChatGPT, Codex, Claude u otros clientes MCP acceso controlado al equipo del usuario. La version 3 amplía el servidor original de archivos con herramientas de sistema, Git, `tmux`, escritorio, captura de pantalla, mouse/teclado, cámara y audio.
+Servidor MCP open source para conectar ChatGPT, Codex, Claude u otros clientes compatibles con una PC propia. Permite que el modelo, según los permisos configurados, pueda inspeccionar archivos, ejecutar comandos, revisar Git, procesos y logs, supervisar sesiones `tmux`, ver capturas de pantalla, consultar hardware, cámaras y audio, y realizar otras tareas locales.
 
-El objetivo principal de este repo es permitir un flujo de trabajo como este:
+La idea es convertir al asistente en un auditor/orquestador del equipo, mientras herramientas como Codex CLI pueden quedar trabajando directamente dentro de los repositorios.
 
 ```text
 ChatGPT / Chief
-  ├─ inspecciona repos, logs, procesos, pantalla y estado del sistema
-  ├─ decide prioridades y audita resultados
-  └─ supervisa sesiones tmux
-        ├─ Codex CLI / proyecto A
-        ├─ Codex CLI / proyecto B
-        └─ otros workers
+  ├─ archivos, logs, procesos y sistema
+  ├─ Git, tests y métricas
+  ├─ capturas de pantalla
+  └─ tmux
+      ├─ Codex CLI / proyecto A
+      └─ Codex CLI / proyecto B
 ```
 
-Todas las acciones se ejecutan con los permisos del usuario que inicia el MCP. `MCP_FULL_ACCESS=1` elimina la restricción de rutas del propio servidor, pero **no** salta permisos de Linux, `sudo`, ACLs o permisos de dispositivos.
+> **Seguridad:** el primer arranque usa acceso restringido por defecto. `MCP_FULL_ACCESS=1` debe elegirse explícitamente y otorga al MCP acceso a cualquier ruta/acción que ya permita el usuario del sistema. No convierte al proceso en root ni evita `sudo`, ACLs o permisos del sistema operativo.
 
-## Modos de transporte
+## Inicio rápido en Linux
 
-- `stdio`: recomendado para clientes locales. El cliente arranca el MCP bajo demanda.
-- `HTTP / Streamable HTTP`: usado por ChatGPT Web mediante un túnel como ngrok.
-- `SSE`: compatibilidad con clientes web que todavía usan el transporte MCP SSE.
-
-## Inicio rápido con ngrok
+Clonar el repositorio y ejecutar:
 
 ```bash
-cd /mnt/hdd4tb/repo/mcp-server
+git clone https://github.com/vicktorgabriel/mcp-server.git
+cd mcp-server
+chmod +x start-mcp.sh
 ./start-mcp.sh
 ```
 
-El script inicia Node en `127.0.0.1:3000`, abre el túnel ngrok y muestra la URL pública de ChatGPT:
+El launcher:
+
+1. comprueba Node.js, npm, Git, curl y Python;
+2. intenta instalar automáticamente lo que falte usando `apt`, `dnf`, `pacman`, `zypper`, `apk` o Homebrew;
+3. intenta completar herramientas opcionales de escritorio, `tmux`, ffmpeg, V4L2, etc.;
+4. crea `.env` en el primer arranque;
+5. pregunta si querés acceso restringido o full-control;
+6. pregunta cómo vas a publicar el MCP: ngrok, URL HTTPS propia o sólo local;
+7. inicia el servidor y muestra en la terminal la URL exacta que hay que copiar a ChatGPT.
+
+Algunas instalaciones de paquetes pueden pedir la contraseña de administrador mediante `sudo`/Polkit.
+
+## ¿Necesito ngrok?
+
+**No siempre.** Hay tres escenarios.
+
+### 1. ngrok — recomendado para la mayoría
+
+Elegí `NGROK` si:
+
+- tenés Starlink o CGNAT;
+- tu IP pública cambia;
+- no podés/querés abrir puertos del router;
+- no tenés dominio + certificado HTTPS;
+- querés la forma más sencilla de conectar ChatGPT Web.
+
+El launcher puede descargar ngrok v3 automáticamente en `~/.local/bin`. La primera vez todavía tenés que asociarlo a tu cuenta:
+
+```bash
+ngrok config add-authtoken TU_TOKEN
+```
+
+Luego:
+
+```bash
+./start-mcp.sh
+```
+
+La terminal mostrará algo similar a:
 
 ```text
-https://TU-TUNEL.ngrok-free.app/mcp
+URL PARA CHATGPT:
+  https://xxxx.ngrok-free.app/mcp
 ```
 
-El MCP existe públicamente sólo mientras el script/ngrok estén levantados. `Ctrl+C` cierra ambos procesos.
+El túnel existe sólo mientras ngrok esté ejecutándose. Si usás el dominio gratuito de ngrok, la URL puede cambiar al crear un túnel nuevo; en ese caso actualizá la URL del conector en ChatGPT.
 
-## Actualizar otra máquina
+### 2. IP pública/fija o DDNS — sin ngrok
 
-```bash
-cd /ruta/al/mcp-server
-git pull
-npm test
-./self-test.sh
-./start-mcp.sh
+Podés prescindir de ngrok si ya tenés una **URL HTTPS pública** que llegue a la máquina.
+
+Una IP fija por sí sola no alcanza. Normalmente necesitás:
+
+```text
+Internet
+  -> https://mcp.midominio.com
+  -> DNS a tu IP pública/fija
+  -> certificado TLS válido
+  -> Caddy / Nginx / Traefik u otro reverse proxy
+  -> http://127.0.0.1:3000
 ```
 
-`self-test.sh` comprueba sintaxis, inventario de herramientas, capacidades locales, Git, tmux y una captura de pantalla cuando existe una sesión gráfica accesible.
+También puede usarse una IP dinámica con DDNS, siempre que resuelvas el acceso público y HTTPS correctamente.
 
-## Requisitos
+En el primer arranque elegí:
 
-Base:
+```text
+2) URL HTTPS PROPIA
+```
 
-- Node.js
-- Git
-- bash (Linux)
-- ngrok para ChatGPT Web remoto
+y escribí, por ejemplo:
 
-Para el conjunto completo en Linux:
+```text
+https://mcp.midominio.com
+```
 
-- `tmux`
-- `systemctl` / `journalctl`
-- `wmctrl`
-- `gnome-screenshot`, `grim` o `scrot`
-- `python3` + `python-xlib` para mouse/teclado X11
-- `ffmpeg` para cámaras V4L2
-- `pactl` o herramientas ALSA para inventario de audio
+El launcher mostrará para ChatGPT:
 
-En X11 el control de teclado/mouse usa `desktop-control.py` + XTEST. En KDE Plasma Wayland, `screen_capture` usa Spectacle en segundo plano y devuelve una imagen MCP; la inyección global de teclado/mouse sigue estando restringida por el compositor y las herramientas X11 sólo alcanzan ventanas XWayland.
+```text
+https://mcp.midominio.com/mcp
+```
 
-## Configuración
+### 3. Sólo local
 
-Ejemplo `.env`:
+Para Claude Desktop, Codex u otros clientes MCP instalados en la misma computadora podés usar `stdio` y no publicar nada en Internet.
+
+Ejemplo:
+
+```text
+node /ruta/mcp-server/mcp-server.js --stdio
+```
+
+ChatGPT Web remoto no puede acceder directamente a `127.0.0.1`; para ese caso necesitás una URL alcanzable desde Internet, ya sea mediante un túnel o infraestructura propia.
+
+## Configurar ChatGPT
+
+Con el MCP y el túnel/URL pública levantados:
+
+1. Abrí **Configuración** de ChatGPT.
+2. Buscá **Apps / Connectors / Conectores** y las opciones avanzadas o **Developer Mode / Modo desarrollador**. El nombre exacto puede variar según la versión de la interfaz.
+3. Agregá un servidor MCP personalizado.
+4. Elegí un nombre, por ejemplo `MCP Mi PC`.
+5. Pegá la URL que imprimió el launcher, terminada en `/mcp`:
+
+```text
+https://xxxx.ngrok-free.app/mcp
+```
+
+6. Seleccioná la autenticación correspondiente. Si dejaste `MCP_AUTH_TOKEN` vacío, configurá el conector sin autenticación si la interfaz lo permite.
+7. Guardá y habilitá el MCP en el chat.
+8. Una primera prueba útil es pedir:
+
+```text
+Usá MCP Mi PC y ejecutá control_capabilities.
+```
+
+Después podés pedir, por ejemplo:
+
+```text
+Mostrame el estado del sistema.
+Revisá este repositorio y el git diff.
+Listá las sesiones tmux.
+Hacé una captura de pantalla.
+Auditá lo que está haciendo Codex en la sesión tmux "proyecto".
+```
+
+## Configuración `.env`
+
+El launcher crea `.env` automáticamente. También podés editarlo a mano:
 
 ```bash
 PORT=3000
 HOST=127.0.0.1
-WORKING_DIR=/mnt/hdd4tb/repo
-ALLOWED_PATHS=/mnt/hdd4tb/repo
-MCP_FULL_ACCESS=1
+ALLOWED_PATHS=/home/usuario/Proyectos
+WORKING_DIR=/home/usuario/Proyectos
 
-MCP_FAST_MODE=1
-SEARCH_CACHE_TTL_MS=60000
-SEARCH_MAX_FILE_BYTES=524288
-SEARCH_MAX_TOTAL_BYTES=16777216
-SEARCH_SKIP_DIRS=node_modules,.git,dist,build,.next,.nuxt,.cache,coverage,.venv,venv,__pycache__,target,out
-READ_BATCH_LIMIT=25
+# 0 recomendado; 1 acceso completo permitido por el usuario
+MCP_FULL_ACCESS=0
+
+# ngrok | direct | local
+MCP_EXPOSURE_MODE=ngrok
+
+# Sólo para direct. No agregar /mcp al final.
+PUBLIC_BASE_URL=https://mcp.midominio.com
 
 MCP_DESKTOP_ENABLED=1
 MCP_INPUT_ENABLED=1
-MCP_CONTROL_TIMEOUT_MS=120000
-MCP_IMAGE_LIMIT_BYTES=26214400
-
-SSE_HEARTBEAT_MS=15000
-KEEP_ALIVE_TIMEOUT_MS=65000
-ACTIVITY_LOG=activity.log
-
-# Opcional para HTTP/ngrok
 MCP_AUTH_TOKEN=
 ```
 
-### Acceso a archivos
+Para volver a ejecutar el asistente inicial, podés guardar/borrar `.env` y lanzar otra vez `./start-mcp.sh`.
 
-Con:
+## Acceso restringido vs full-control
+
+### Restringido — recomendado
+
+```bash
+MCP_FULL_ACCESS=0
+ALLOWED_PATHS=/home/usuario/Proyectos,/otro/directorio
+```
+
+Las rutas quedan limitadas a `ALLOWED_PATHS`.
+
+### Full-control
 
 ```bash
 MCP_FULL_ACCESS=1
 ```
 
-el servidor acepta rutas absolutas de todo el filesystem y las rutas relativas se resuelven desde `WORKING_DIR`.
+El servidor acepta rutas de todo el filesystem que pueda leer/escribir el usuario que lo ejecuta. Herramientas como `run_command`, señales de proceso, servicios, Git y control de escritorio siguen limitadas por los permisos reales del sistema operativo.
 
-Con:
+No publiques un MCP full-control sin entender qué estás exponiendo. Cerrá el túnel cuando no lo necesites y considerá autenticación/red privada para instalaciones permanentes.
 
-```bash
-MCP_FULL_ACCESS=0
-```
+## Herramientas disponibles
 
-las rutas quedan limitadas a `ALLOWED_PATHS`.
+Actualmente expone 49 herramientas.
 
-## Herramientas
+### Archivos
 
-La version 3 expone actualmente 49 herramientas.
+`search`, `fetch`, `list_files`, `read_file`, `write_file`, `patch_file`, `file_info`, `read_image`, `tail_file`, `run_command`.
 
-### Filesystem
+`read_image` devuelve PNG/JPEG/WebP/GIF como contenido visual MCP, por lo que el modelo puede ver la imagen y no solamente su ruta.
 
-- `search`
-- `fetch`
-- `list_files`
-- `read_file`
-- `write_file`
-- `patch_file`
-- `file_info`
-- `read_image`
-- `tail_file`
-- `run_command`
+### Sistema
 
-`read_image` devuelve contenido MCP `image`, por lo que el modelo puede ver realmente PNG/JPEG/WebP/GIF locales en lugar de recibir sólo una ruta.
-
-### Diagnóstico y sistema
-
-- `control_capabilities`
-- `system_snapshot`
-- `hardware_info`
-- `disk_usage`
-- `network_status`
-- `gpu_status`
-- `process_list`
-- `process_info`
-- `process_signal`
-- `process_start`
-- `service_status`
-- `service_action`
-- `journal_tail`
-
-`process_start` sirve para lanzar trabajos persistentes sin depender del timeout de `run_command`; devuelve PID y archivo de log.
+`control_capabilities`, `system_snapshot`, `hardware_info`, `disk_usage`, `network_status`, `gpu_status`, `process_list`, `process_info`, `process_signal`, `process_start`, `service_status`, `service_action`, `journal_tail`.
 
 ### Git
 
-- `git_status`
-- `git_diff`
-- `git_log`
-- `git_branches`
-- `git_worktrees`
-- `git_command`
+`git_status`, `git_diff`, `git_log`, `git_branches`, `git_worktrees`, `git_command`.
 
-`git_command` permite ejecutar cualquier subcomando Git dentro de un repo: `fetch`, `pull`, `push`, `checkout`, `commit`, `worktree`, etc.
+### tmux / Codex workers
 
-### tmux / workers
+`tmux_list`, `tmux_panes`, `tmux_create`, `tmux_capture`, `tmux_send`, `tmux_interrupt`, `tmux_kill`.
 
-- `tmux_list`
-- `tmux_panes`
-- `tmux_create`
-- `tmux_capture`
-- `tmux_send`
-- `tmux_interrupt`
-- `tmux_kill`
-
-Estas herramientas permiten que ChatGPT supervise una sesión de Codex CLI sin reemplazar su entorno local:
+Esto permite un flujo como:
 
 ```text
-ChatGPT
-  ↓ tmux_capture
-lee qué está haciendo Codex
-  ↓ git_diff / tests / logs
-lo audita
-  ↓ tmux_send
-le entrega la siguiente instrucción o corrección
-```
-
-Ejemplo conceptual:
-
-```text
-tmux_create(session="ailen", cwd="/repo/ailen", command="codex")
-tmux_capture(target="ailen")
-tmux_send(target="ailen", text="Auditá renderer y ejecutá los tests")
+ChatGPT -> tmux_capture -> lee a Codex
+ChatGPT -> git_diff/tests/logs -> audita
+ChatGPT -> tmux_send -> corrige/orienta al worker
+Codex CLI -> sigue trabajando directamente en el repo
 ```
 
 ### Escritorio y visión
 
-- `desktop_info`
-- `screen_capture`
-- `list_windows`
-- `window_action`
-- `mouse_move`
-- `mouse_click`
-- `mouse_scroll`
-- `keyboard_hotkey`
-- `keyboard_type`
-- `desktop_open`
+`desktop_info`, `screen_capture`, `list_windows`, `window_action`, `mouse_move`, `mouse_click`, `mouse_scroll`, `keyboard_hotkey`, `keyboard_type`, `desktop_open`.
 
-`screen_capture` devuelve la captura como contenido MCP `image` y prueba backends con fallback. En KDE Plasma Wayland prioriza Spectacle para evitar bloqueos de `gnome-screenshot`. Modos:
-
-- `screen`: escritorio completo.
-- `active_window`: ventana activa.
-
-`window_action` soporta:
-
-- focus
-- close
-- maximize
-- unmaximize
-- minimize
-- raise
-- move_resize
-
-En Linux/X11, mouse y teclado usan `python-xlib` y XTEST, por lo que no requieren `xdotool`.
+En X11 hay control global mediante XTEST/python-xlib. En KDE Plasma Wayland la captura prioriza Spectacle; Wayland puede restringir mouse/teclado global y algunas acciones de ventanas.
 
 ### Cámara y audio
 
-- `camera_list`
-- `camera_snapshot`
-- `audio_devices`
+`camera_list`, `camera_snapshot`, `audio_devices`.
 
-`camera_snapshot` usa `ffmpeg`/V4L2 y devuelve un frame como imagen MCP. Esto permite inspección visual de cámaras locales cuando el usuario del MCP tiene permisos sobre `/dev/video*`.
+## Dependencias
 
-## Flujo recomendado ChatGPT + Codex CLI
+El launcher intenta instalarlas automáticamente cuando puede.
 
-Para proyectos grandes conviene separar roles:
+Base:
 
-```text
-ChatGPT
-  = análisis, planificación, auditoría, coordinación y supervisión
+- Node.js 18+
+- npm
+- Git
+- curl
+- Python 3
 
-Codex CLI
-  = edición intensiva del repo, compilación, tests y debugging
+Extras útiles en Linux:
 
-MCP
-  = acceso de ChatGPT al equipo y a las sesiones de Codex
+- `tmux`
+- `wmctrl`
+- `scrot`, `gnome-screenshot`, `grim` o KDE Spectacle
+- `python3-xlib`
+- `xdotool`
+- `ffmpeg`
+- `v4l-utils`
+- PulseAudio/PipeWire o ALSA para audio
+
+Instalación manual de dependencias:
+
+```bash
+./install-deps.sh
 ```
 
-Un flujo típico:
+Instalación manual de ngrok:
 
-1. ChatGPT usa `git_status`, `git_diff`, logs y métricas para inspeccionar el proyecto.
-2. Si ya hay un Codex trabajando, usa `tmux_capture` para leer su estado.
-3. ChatGPT determina la siguiente acción.
-4. Usa `tmux_send` para orientar al worker.
-5. Codex modifica código y ejecuta pruebas localmente.
-6. ChatGPT vuelve a auditar diff/tests/logs/pantalla.
-7. Aprueba, corrige o reasigna el trabajo.
+```bash
+./install-ngrok.sh
+```
 
-Así el contexto de estrategia puede quedar en ChatGPT mientras Codex conserva el contexto técnico del repo.
+## Seguridad y autenticación
 
-## Seguridad HTTP/ngrok
+`GET /health` se mantiene disponible para comprobar si el servidor está vivo.
 
-`GET /health` queda público para diagnóstico del túnel.
-
-Si `MCP_AUTH_TOKEN` está configurado, el resto de endpoints (`/config`, `/tools`, `/mcp`, `/sse`, `/messages`) requiere:
+Si configurás `MCP_AUTH_TOKEN`, los demás endpoints esperan:
 
 ```text
 Authorization: Bearer <token>
 ```
 
-La version 3 ya **no devuelve el token** desde `/config` ni lo imprime en claro en el log de arranque.
+La aplicación no devuelve el token desde `/config` ni lo imprime en claro en el arranque.
 
-Generar uno opcionalmente:
+Generar un token:
 
 ```bash
-export MCP_AUTH_TOKEN="$(openssl rand -hex 24)"
-./start-mcp.sh
+openssl rand -hex 24
 ```
 
-Si el cliente web que estés usando no soporta bearer token, puede mantenerse vacío. En ese caso la protección efectiva es que el proceso y el túnel sólo estén activos cuando vos los levantes, además de las protecciones que aplique el proveedor del túnel.
-
-### Importante sobre `MCP_FULL_ACCESS=1`
-
-Con acceso completo y `run_command`/`process_signal`/`service_action`/input de escritorio habilitados, el MCP tiene aproximadamente los mismos permisos que la cuenta Linux que lo ejecuta. No puede convertirse en root por sí solo, pero sí puede modificar archivos y procesos que pertenezcan al usuario.
-
-Cada llamada queda registrada como `[ACTIVITY]`; si `ACTIVITY_LOG` está definido también se escribe JSONL. Para herramientas que reciben texto (`tmux_send`, `keyboard_type`, escritura de archivos), el registro guarda tamaño/metadatos y no el contenido completo.
+Cada llamada MCP se registra como actividad. Las acciones destructivas conservan metadata MCP de riesgo aunque `MCP_FULL_ACCESS=1` esté activo.
 
 ## Endpoints
 
-- `GET /health`: estado básico; permanece público.
-- `GET /config`: configuración sugerida; requiere auth cuando hay token.
-- `GET /tools`: diagnóstico del inventario; requiere auth cuando hay token.
-- `POST /mcp`: Streamable HTTP MCP.
-- `GET /mcp`: stream compatible.
-- `GET /sse` + `POST /messages`: transporte SSE legacy.
-
-## Clientes locales por stdio
-
-Ejemplo:
-
-```json
-{
-  "mcpServers": {
-    "local-control": {
-      "command": "node",
-      "args": [
-        "/mnt/hdd4tb/repo/mcp-server/mcp-server.js",
-        "--stdio"
-      ],
-      "env": {
-        "WORKING_DIR": "/mnt/hdd4tb/repo",
-        "MCP_FULL_ACCESS": "1",
-        "MCP_FAST_MODE": "1",
-        "MCP_DESKTOP_ENABLED": "1",
-        "MCP_INPUT_ENABLED": "1"
-      }
-    }
-  }
-}
+```text
+GET  /health
+GET  /config
+GET  /tools
+POST /mcp
+GET  /mcp
+GET  /sse
+POST /messages
 ```
 
-## Desarrollo y pruebas
+Para ChatGPT moderno usá principalmente:
+
+```text
+https://TU_URL_PUBLICA/mcp
+```
+
+## Actualizar
+
+```bash
+git pull
+./start-mcp.sh
+```
+
+O para probar antes:
+
+```bash
+git pull
+npm test
+./self-test.sh
+```
+
+## Pruebas
+
+Chequeo estático:
 
 ```bash
 npm test
 ```
 
-Prueba funcional completa:
+Chequeo funcional:
 
 ```bash
 ./self-test.sh
 ```
 
-La prueba funcional no pulsa teclas ni hace clicks. Sí puede realizar una captura de pantalla y crea una sesión `tmux` temporal que elimina al finalizar.
+`self-test.sh` crea y elimina una sesión tmux temporal y puede tomar una captura de pantalla. No hace clicks ni escribe texto en otras aplicaciones.
+
+## Windows
+
+El núcleo MCP (archivos, comandos, Git, procesos compatibles) funciona con Node.js. `start-mcp.cmd` sigue disponible como launcher para Windows, pero las herramientas de escritorio X11 son específicas de Linux. En Windows el nivel exacto de herramientas disponibles se puede consultar con `control_capabilities`.
+
+Para una instalación orientada a control de escritorio completo, Linux/X11 es actualmente el entorno con mayor cobertura de este proyecto.
+
+## Licencia
+
+MIT. Usalo bajo tu propia responsabilidad, especialmente cuando habilites acceso completo o publiques el servidor en Internet.

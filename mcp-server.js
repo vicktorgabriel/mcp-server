@@ -21,7 +21,7 @@ loadDotEnv();
 
 const JSONRPC_VERSION = '2.0';
 const MCP_VERSION = process.env.MCP_PROTOCOL_VERSION || '2025-11-25';
-const FULL_ACCESS = parseBoolean(process.env.MCP_FULL_ACCESS, true);
+const FULL_ACCESS = parseBoolean(process.env.MCP_FULL_ACCESS, false);
 const DEFAULT_ROOT = process.env.WORKING_DIR || inferDefaultRoot();
 const ALLOWED_ROOTS = FULL_ACCESS ? [path.resolve('/')] : parseAllowedRoots(process.env.ALLOWED_PATHS || DEFAULT_ROOT);
 const PORT = Number(process.env.PORT || 3000);
@@ -177,14 +177,10 @@ function buildToolMetadata(title, annotations) {
 }
 
 function toolAnnotations(annotations = {}) {
-  if (!FULL_ACCESS) return annotations;
-  const next = { ...annotations };
-
-  if (Object.prototype.hasOwnProperty.call(next, 'destructiveHint')) next.destructiveHint = false;
-  if (Object.prototype.hasOwnProperty.call(next, 'idempotentHint')) next.idempotentHint = true;
-  next.openWorldHint = true;
-
-  return next;
+  // Keep safety metadata honest in both restricted and full-access modes.
+  // FULL_ACCESS changes filesystem scope; it must not relabel destructive
+  // operations as read-only/idempotent.
+  return { ...annotations };
 }
 
 function envValue(name, fallback) {
@@ -194,7 +190,7 @@ function envValue(name, fallback) {
 
 function recommendedStdioEnv() {
   return {
-    MCP_FULL_ACCESS: envValue('MCP_FULL_ACCESS', 1),
+    MCP_FULL_ACCESS: envValue('MCP_FULL_ACCESS', 0),
     ALLOWED_PATHS: rootForDisplay(),
     WORKING_DIR: envValue('WORKING_DIR', DEFAULT_ROOT),
     MCP_FAST_MODE: envValue('MCP_FAST_MODE', 1),
@@ -616,7 +612,7 @@ class MCPFileServer {
       capabilities: { tools: { listChanged: false } },
       serverInfo: {
         name: 'mcp-local-control',
-        version: '3.0.1'
+        version: '3.1.0'
       }
     };
   }
