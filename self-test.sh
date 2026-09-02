@@ -9,6 +9,14 @@ export WORKING_DIR="${WORKING_DIR:-$(cd .. && pwd)}"
 printf '== Static checks ==\n'
 npm run check
 
+printf '\n== Launcher modes ==\n'
+LAUNCHER_HELP="$(./start-mcp.sh --help)"
+grep -q -- '--temporary' <<<"$LAUNCHER_HELP"
+grep -q -- '--persistent' <<<"$LAUNCHER_HELP"
+grep -q 'TEMPORAL / PERSISTENTE' <<<"$LAUNCHER_HELP"
+grep -q 'MCP_LAUNCH_MODE=persistent' install-service.sh
+echo 'launcher_modes=OK'
+
 mcp_call() {
   local request="$1"
   printf '%s\n' "$request" | node mcp-server.js --stdio 2>/tmp/mcp-self-test.stderr
@@ -22,6 +30,30 @@ let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=
 printf '\n== Runtime diagnostics ==\n'
 mcp_call '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"mcp_runtime_status","arguments":{}}}' \
   | node -e 'let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); if(j.error) throw new Error(j.error.message); const x=j.result.structuredContent; if(!x || !x.config || !x.local || !x.tunnel) throw new Error("runtime status incomplete"); console.log(`runtime_status=OK mode=${x.config.exposureMode}`);});'
+
+printf '\n== Temporary runtime mode ==\n'
+(
+  set -euo pipefail
+  TEST_DIR="$(mktemp -d /tmp/mcp-temporary-mode-test.XXXXXX)"
+  TEST_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+  PORT="$TEST_PORT" MCP_EXPOSURE_MODE=local MCP_RUNTIME_DIR="$TEST_DIR/runtime" \
+    MCP_LAUNCH_MODE=temporary node mcp-supervisor.js >"$TEST_DIR/output" 2>&1 &
+  TEST_PID=$!
+  cleanup_temporary_test() {
+    kill -TERM "$TEST_PID" 2>/dev/null || true
+    wait "$TEST_PID" 2>/dev/null || true
+    rm -rf "$TEST_DIR"
+  }
+  trap cleanup_temporary_test EXIT
+  for _ in $(seq 1 50); do
+    curl -fsS "http://127.0.0.1:$TEST_PORT/health" >/dev/null 2>&1 && break
+    sleep 0.1
+  done
+  curl -fsS "http://127.0.0.1:$TEST_PORT/health" >/dev/null
+  STATUS_JSON="$(PORT="$TEST_PORT" MCP_EXPOSURE_MODE=local MCP_RUNTIME_DIR="$TEST_DIR/runtime" node runtime-diagnostics.js status)"
+  printf '%s' "$STATUS_JSON" | node -e '
+let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); if(!j.ok || !j.launch || !j.launch.temporary || j.launch.persistent || j.launch.mode!=="temporary") {console.error(j); process.exit(1)}; console.log("temporary_runtime=OK");});'
+)
 
 printf '\n== ngrok reserved URL compatibility ==\n'
 (

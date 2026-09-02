@@ -1040,6 +1040,7 @@ function startHttp() {
         sendJson(res, 200, {
           ok: true,
           version: PACKAGE_VERSION,
+          launchMode: process.env.MCP_LAUNCH_MODE || 'direct',
           transport: ['streamable-http', 'sse'],
           allowedRoots: ALLOWED_ROOTS,
           auth: AUTH_TOKEN ? 'bearer' : 'none',

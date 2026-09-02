@@ -1,6 +1,6 @@
 {
   "name": "mcp-server-local",
-  "version": "3.2.1",
+  "version": "3.3.0",
   "description": "MCP local full-control para ChatGPT, Codex, Claude y otros clientes MCP",
   "main": "mcp-server.js",
   "scripts": {
@@ -13,7 +13,9 @@
     "tunnel": "./start-mcp.sh",
     "tunnel:win": "start-mcp.cmd",
     "doctor": "node runtime-diagnostics.js doctor",
-    "service": "./start-mcp.sh"
+    "service": "./start-mcp.sh --persistent",
+    "temporary": "./start-mcp.sh --temporary",
+    "persistent": "./start-mcp.sh --persistent"
   },
   "keywords": [
     "mcp",

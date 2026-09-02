@@ -21,6 +21,7 @@ const LOCAL_HOST = (!HOST || HOST === '0.0.0.0' || HOST === '::' || HOST === '[:
   : HOST.replace(/^\[|\]$/g, '');
 const PORT = validPort(process.env.PORT, 3000);
 const MODE = String(process.env.MCP_EXPOSURE_MODE || 'ngrok').trim().toLowerCase();
+const LAUNCH_MODE = String(process.env.MCP_LAUNCH_MODE || (process.env.INVOCATION_ID ? 'persistent' : 'temporary')).trim().toLowerCase();
 const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '');
 const RUNTIME_DIR = path.resolve(process.env.MCP_RUNTIME_DIR || path.join(ROOT, '.runtime'));
 const STATUS_PATH = path.join(RUNTIME_DIR, 'status.json');
@@ -47,6 +48,7 @@ const ngrokLog = fs.createWriteStream(NGROK_LOG_PATH, { flags: 'a', mode: 0o600 
 const status = {
   state: 'starting',
   mode: MODE,
+  launchMode: LAUNCH_MODE,
   host: HOST,
   port: PORT,
   supervisorPid: process.pid,
@@ -422,7 +424,7 @@ process.on('SIGHUP', () => shutdown(0, 'SIGHUP'));
 process.on('uncaughtException', (error) => shutdown(1, `uncaughtException: ${error.stack || error.message}`));
 process.on('unhandledRejection', (error) => shutdown(1, `unhandledRejection: ${error && (error.stack || error.message) || error}`));
 
-log(`Supervisor iniciado (pid=${process.pid}, mode=${MODE})`);
+log(`Supervisor iniciado (pid=${process.pid}, mode=${MODE}, launch=${LAUNCH_MODE})`);
 spawnServer();
 configureExposure();
 healthTimer = setInterval(() => { checkHealth().catch((error) => log(`health check: ${error.message}`, 'WARN')); }, 2000);

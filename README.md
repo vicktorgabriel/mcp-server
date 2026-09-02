@@ -29,27 +29,50 @@ chmod +x start-mcp.sh
 
 El launcher:
 
-1. comprueba Node.js, npm, Git, curl y Python;
-2. intenta instalar automáticamente lo que falte usando `apt`, `dnf`, `pacman`, `zypper`, `apk` o Homebrew;
-3. intenta completar herramientas opcionales de escritorio, `tmux`, ffmpeg, V4L2, etc.;
-4. crea `.env` en el primer arranque;
-5. pregunta si querés acceso restringido o full-control;
-6. pregunta cómo vas a publicar el MCP: ngrok, URL HTTPS propia o sólo local;
-7. instala o actualiza `mcp-local.service`;
-8. inicia el supervisor, el servidor MCP y ngrok;
-9. muestra la URL exacta que hay que copiar a ChatGPT y vuelve al prompt.
+1. muestra un menú para elegir inicio **temporal** o **persistente**;
+2. comprueba Node.js, npm, Git, curl y Python;
+3. intenta instalar automáticamente lo que falte usando `apt`, `dnf`, `pacman`, `zypper`, `apk` o Homebrew;
+4. intenta completar herramientas opcionales de escritorio, `tmux`, ffmpeg, V4L2, etc.;
+5. crea `.env` en el primer arranque;
+6. pregunta si querés acceso restringido o full-control;
+7. pregunta cómo vas a publicar el MCP: ngrok, URL HTTPS propia o sólo local;
+8. inicia MCP y ngrok según el modo elegido y muestra la URL exacta para ChatGPT.
 
-El servicio queda habilitado para el arranque del sistema. Cerrar la terminal o la ventana VNC no detiene MCP ni ngrok. Algunas instalaciones de paquetes pueden pedir la contraseña de administrador mediante `sudo`/Polkit.
+El modo predeterminado es **temporal**: mantiene el log visible y detiene MCP/ngrok al cerrar la terminal o pulsar `Ctrl+C`. Algunas instalaciones de paquetes pueden pedir la contraseña de administrador mediante `sudo`/Polkit.
 
-## Servicio persistente y comandos de control
+## Modos de inicio
 
-El inicio normal es persistente:
+### Temporal — recomendado para uso ocasional
 
 ```bash
 ./start-mcp.sh
+# Elegir 1
 ```
 
-El comando instala o actualiza la unidad `mcp-local.service`, migra procesos antiguos iniciados desde una terminal y deja todo funcionando en segundo plano. Para administrarlo:
+También puede iniciarse directamente:
+
+```bash
+./start-mcp.sh --temporary
+```
+
+El log queda visible en la terminal. Al pulsar `Ctrl+C` o cerrar esa terminal se detienen el servidor MCP y el túnel ngrok. Al elegir este modo, el launcher también detiene y deshabilita cualquier servicio persistente anterior para evitar que vuelva a iniciarse con el equipo.
+
+### Persistente — para disponibilidad continua
+
+```bash
+./start-mcp.sh
+# Elegir 2
+```
+
+O directamente:
+
+```bash
+./start-mcp.sh --persistent
+```
+
+Este modo instala o actualiza `mcp-local.service`, lo habilita al arranque y mantiene MCP/ngrok activos aunque cierres la terminal. Después de instalarlo, el launcher sigue el log; `Ctrl+C` cierra sólo esa vista y no detiene el servicio.
+
+Comandos de control:
 
 ```bash
 ./mcpctl.sh status
@@ -57,15 +80,10 @@ El comando instala o actualiza la unidad `mcp-local.service`, migra procesos ant
 ./mcpctl.sh logs
 ./mcpctl.sh restart
 ./mcpctl.sh stop
+./mcpctl.sh disable
 ```
 
-`./mcpctl.sh logs` muestra las últimas líneas y termina; no deja la terminal enganchada. `./mcpctl.sh logs-follow` sigue el journal hasta `Ctrl+C`, pero cerrar esa vista tampoco detiene el servicio.
-
-El modo anterior, unido a la terminal, sigue disponible sólo para depuración:
-
-```bash
-./start-mcp.sh --foreground
-```
+`disable` detiene el servicio y evita que vuelva a iniciarse automáticamente. `--foreground` se conserva como alias compatible de `--temporary`.
 
 ## ¿Necesito ngrok?
 
@@ -93,14 +111,14 @@ Luego:
 ./start-mcp.sh
 ```
 
-El instalador levanta ngrok dentro del servicio persistente y mostrará algo similar a:
+El launcher levanta ngrok en modo temporal o persistente, según la opción elegida, y mostrará algo similar a:
 
 ```text
 URL PARA CHATGPT:
   https://xxxx.ngrok-free.app/mcp
 ```
 
-El supervisor reinicia ngrok si se cae y `systemd` reinicia el conjunto después de un fallo o reinicio del VPS. El upstream local del MCP es siempre el puerto configurado en `PORT` —por defecto `3000`—; `NGROK_URL` sólo fija la dirección pública. Si usás una URL gratuita aleatoria, puede cambiar al crear un túnel nuevo; consultala con `./mcpctl.sh url` y actualizá el conector en ChatGPT cuando corresponda.
+El supervisor reinicia ngrok si se cae mientras la sesión elegida siga activa. En modo temporal, cerrar la terminal termina el túnel; en modo persistente, `systemd` mantiene el conjunto activo y lo inicia con el equipo. El upstream local del MCP es siempre el puerto configurado en `PORT` —por defecto `3000`—; `NGROK_URL` sólo fija la dirección pública. Si usás una URL gratuita aleatoria, puede cambiar al crear un túnel nuevo; consultala con `./mcpctl.sh url` y actualizá el conector en ChatGPT cuando corresponda.
 
 ### 2. IP pública/fija o DDNS — sin ngrok
 
@@ -356,7 +374,7 @@ git pull
 ./start-mcp.sh
 ```
 
-`./start-mcp.sh` vuelve a instalar la unidad con las rutas y la versión actuales, reinicia MCP/ngrok y regresa al prompt. No hace falta dejar una terminal abierta.
+Después de actualizar, `./start-mcp.sh` vuelve a mostrar el menú. Elegí temporal para mantenerlo sólo durante esa terminal o persistente para instalar/actualizar el servicio.
 
 O para probar antes:
 
@@ -369,7 +387,7 @@ npm test
 
 ## Diagnóstico de errores 502
 
-Un `502 Upstream or external service errors` suele significar que la URL pública existe, pero ngrok no puede llegar al servidor local, el proceso murió o el conector conserva una URL gratuita anterior. En ngrok v3 actual, una URL reservada se pasa con `--url`; la versión 3.2.1 del launcher corrige la compatibilidad anterior que usaba `--domain`. Ejecutá:
+Un `502 Upstream or external service errors` suele significar que la URL pública existe, pero ngrok no puede llegar al servidor local, el proceso murió o el conector conserva una URL gratuita anterior. En ngrok v3 actual, una URL reservada se pasa con `--url`; el launcher actual conserva compatibilidad con configuraciones anteriores que usaban `NGROK_DOMAIN`. Ejecutá:
 
 ```bash
 ./mcpctl.sh status
@@ -384,7 +402,7 @@ mcp_runtime_status
 mcp_runtime_logs
 ```
 
-El estado sano debe mostrar `mcp-local.service` activo, `/health` con HTTP 200 y una URL HTTPS terminada en `/mcp`.
+El estado sano debe mostrar una ejecución temporal o persistente activa, `/health` con HTTP 200 y una URL HTTPS terminada en `/mcp`.
 
 ## Pruebas
 

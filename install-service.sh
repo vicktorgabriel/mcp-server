@@ -100,6 +100,7 @@ Environment="HOME=$HOME_ESC"
 Environment="PATH=$PATH_ESC"
 Environment="MCP_SERVICE_NAME=$SERVICE"
 Environment="MCP_RUNTIME_DIR=$ROOT_ESC/.runtime"
+Environment="MCP_LAUNCH_MODE=persistent"
 ExecStart="$NODE_ESC" "$ROOT_ESC/mcp-supervisor.js"
 Restart=always
 RestartSec=4

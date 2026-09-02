@@ -254,6 +254,22 @@ async function collectRuntimeStatus() {
     error: serviceResult.ok ? '' : redactText(serviceResult.stderr || serviceResult.error || '')
   };
 
+  const runtimeSupervisorPid = Number(runtimeRaw && runtimeRaw.supervisorPid || 0);
+  const runtimeActive = Boolean(
+    runtimeFresh
+    && runtimeRaw
+    && Number(runtimeRaw.port) === port
+    && health.ok
+    && processExists(runtimeSupervisorPid)
+  );
+  const persistentActive = Boolean(
+    service.active
+    && (!runtimeActive || service.mainPid === runtimeSupervisorPid)
+  );
+  const runtimeLaunchMode = runtimeActive
+    ? String(runtimeRaw.launchMode || (persistentActive ? 'persistent' : 'temporary')).toLowerCase()
+    : persistentActive ? 'persistent' : 'stopped';
+
   let liveTunnel = null;
   const expectedTunnelTarget = `http://${localHost}:${port}`;
   if (ngrokApi.ok && ngrokApi.data && Array.isArray(ngrokApi.data.tunnels)) {
@@ -284,17 +300,24 @@ async function collectRuntimeStatus() {
     .slice(0, 20);
 
   const warnings = [];
+  const notes = [];
   if (!health.ok) warnings.push(`MCP local no responde en http://${localHost}:${port}/health: ${health.error || health.statusCode || 'sin respuesta'}`);
   if (mode === 'ngrok' && !liveTunnel) warnings.push('ngrok no expone actualmente un tunel HTTPS en la API local 127.0.0.1:4040.');
-  if (!service.installed) warnings.push(`El servicio ${serviceName} no esta instalado.`);
-  else if (!service.active) warnings.push(`El servicio ${serviceName} no esta activo (${service.state}/${service.subState}).`);
-  if (runtimeRaw && !runtimeFresh) warnings.push(`El estado persistido tiene ${runtimeAgeSeconds} segundos y puede estar obsoleto.`);
+  if (!runtimeActive && !service.installed) warnings.push(`El servicio ${serviceName} no esta instalado y no hay una sesion temporal activa.`);
+  else if (!runtimeActive && !service.active) warnings.push(`El servicio ${serviceName} no esta activo (${service.state}/${service.subState}).`);
+  if (runtimeRaw && !runtimeFresh) warnings.push(`El estado de ejecucion tiene ${runtimeAgeSeconds} segundos y puede estar obsoleto.`);
+  if (runtimeActive && runtimeLaunchMode === 'temporary') {
+    notes.push('Modo temporal activo: cerrar la terminal o pulsar Ctrl+C detiene MCP y ngrok.');
+  }
+  if (persistentActive) {
+    notes.push('Modo persistente activo: el servicio continua al cerrar la terminal.');
+  }
 
-  const serviceHealthy = process.platform !== 'linux' || (service.installed && service.active);
+  const launchHealthy = process.platform !== 'linux' || persistentActive || runtimeActive;
   const exposureHealthy = mode === 'ngrok' ? Boolean(liveTunnel) : mode === 'direct' ? Boolean(publicUrl) : mode === 'local';
 
   return {
-    ok: Boolean(health.ok && exposureHealthy && serviceHealthy),
+    ok: Boolean(health.ok && exposureHealthy && launchHealthy),
     checkedAt: new Date().toISOString(),
     repository: ROOT,
     config: {
@@ -305,6 +328,13 @@ async function collectRuntimeStatus() {
       authConfigured: Boolean(configValue(fileEnv, 'MCP_AUTH_TOKEN', '')),
       allowedPathsConfigured: Boolean(configValue(fileEnv, 'ALLOWED_PATHS', '')),
       runtimeDir
+    },
+    launch: {
+      mode: runtimeLaunchMode,
+      active: runtimeActive || persistentActive,
+      temporary: runtimeActive && runtimeLaunchMode === 'temporary',
+      persistent: persistentActive,
+      supervisorPid: runtimeActive ? runtimeSupervisorPid : persistentActive ? service.mainPid : 0
     },
     service,
     local: {
@@ -327,6 +357,7 @@ async function collectRuntimeStatus() {
       ageSeconds: runtimeAgeSeconds,
       status: runtime
     },
+    notes,
     warnings
   };
 }
