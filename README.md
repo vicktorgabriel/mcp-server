@@ -100,7 +100,7 @@ URL PARA CHATGPT:
   https://xxxx.ngrok-free.app/mcp
 ```
 
-El supervisor reinicia ngrok si se cae y `systemd` reinicia el conjunto después de un fallo o reinicio del VPS. Si usás el dominio gratuito de ngrok, la URL puede cambiar al crear un túnel nuevo; consultala con `./mcpctl.sh url` y actualizá el conector en ChatGPT cuando corresponda.
+El supervisor reinicia ngrok si se cae y `systemd` reinicia el conjunto después de un fallo o reinicio del VPS. El upstream local del MCP es siempre el puerto configurado en `PORT` —por defecto `3000`—; `NGROK_URL` sólo fija la dirección pública. Si usás una URL gratuita aleatoria, puede cambiar al crear un túnel nuevo; consultala con `./mcpctl.sh url` y actualizá el conector en ChatGPT cuando corresponda.
 
 ### 2. IP pública/fija o DDNS — sin ngrok
 
@@ -198,6 +198,9 @@ MCP_FULL_ACCESS=0
 
 # ngrok | direct | local
 MCP_EXPOSURE_MODE=ngrok
+
+# Opcional: endpoint reservado de ngrok. Debe ser la URL pública, no el puerto local.
+NGROK_URL=https://mi-endpoint.ngrok-free.dev
 
 # Sólo para direct. No agregar /mcp al final.
 PUBLIC_BASE_URL=https://mcp.midominio.com
@@ -366,7 +369,7 @@ npm test
 
 ## Diagnóstico de errores 502
 
-Un `502 Upstream or external service errors` suele significar que la URL pública existe, pero ngrok no puede llegar al servidor local, el proceso murió o el conector conserva una URL gratuita anterior. Ejecutá:
+Un `502 Upstream or external service errors` suele significar que la URL pública existe, pero ngrok no puede llegar al servidor local, el proceso murió o el conector conserva una URL gratuita anterior. En ngrok v3 actual, una URL reservada se pasa con `--url`; la versión 3.2.1 del launcher corrige la compatibilidad anterior que usaba `--domain`. Ejecutá:
 
 ```bash
 ./mcpctl.sh status

@@ -23,6 +23,41 @@ printf '\n== Runtime diagnostics ==\n'
 mcp_call '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"mcp_runtime_status","arguments":{}}}' \
   | node -e 'let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); if(j.error) throw new Error(j.error.message); const x=j.result.structuredContent; if(!x || !x.config || !x.local || !x.tunnel) throw new Error("runtime status incomplete"); console.log(`runtime_status=OK mode=${x.config.exposureMode}`);});'
 
+printf '\n== ngrok reserved URL compatibility ==\n'
+(
+  set -euo pipefail
+  TEST_DIR="$(mktemp -d /tmp/mcp-ngrok-url-test.XXXXXX)"
+  TEST_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+  FAKE_NGROK="$TEST_DIR/fake-ngrok"
+  ARGS_FILE="$TEST_DIR/args"
+  cat > "$FAKE_NGROK" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "${FAKE_NGROK_ARGS:?}"
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+FAKE
+  chmod +x "$FAKE_NGROK"
+  PORT="$TEST_PORT" MCP_EXPOSURE_MODE=ngrok MCP_RUNTIME_DIR="$TEST_DIR/runtime" \
+    NGROK_BIN="$FAKE_NGROK" NGROK_DOMAIN=legacy-example.ngrok-free.dev \
+    FAKE_NGROK_ARGS="$ARGS_FILE" node mcp-supervisor.js >"$TEST_DIR/output" 2>&1 &
+  TEST_PID=$!
+  cleanup_ngrok_test() {
+    kill -TERM "$TEST_PID" 2>/dev/null || true
+    wait "$TEST_PID" 2>/dev/null || true
+    rm -rf "$TEST_DIR"
+  }
+  trap cleanup_ngrok_test EXIT
+  for _ in $(seq 1 50); do
+    [ -f "$ARGS_FILE" ] && break
+    sleep 0.1
+  done
+  [ -f "$ARGS_FILE" ]
+  grep -Fxq -- '--url' "$ARGS_FILE"
+  grep -Fxq -- 'https://legacy-example.ngrok-free.dev' "$ARGS_FILE"
+  ! grep -Fxq -- '--domain' "$ARGS_FILE"
+  echo 'ngrok_url=OK'
+)
+
 printf '\n== Capability probe ==\n'
 mcp_call '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"control_capabilities","arguments":{}}}' \
   | node -e 'let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); console.log(JSON.stringify(j.result.structuredContent,null,2));});'

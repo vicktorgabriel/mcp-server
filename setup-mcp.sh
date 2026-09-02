@@ -116,8 +116,15 @@ if [ "$MODE" = "ngrok" ]; then
   fi
 
   if command -v ngrok >/dev/null 2>&1; then
-    if ! ngrok config check >/dev/null 2>&1; then
-      warn "ngrok esta instalado pero su configuracion no pudo validarse."
+    NGROK_CHECK_OUTPUT=""
+    if ! NGROK_CHECK_OUTPUT="$(ngrok config check 2>&1)"; then
+      warn "La configuracion de ngrok no pudo validarse; intento actualizarla automaticamente."
+      ngrok config upgrade >/dev/null 2>&1 || true
+      if NGROK_CHECK_OUTPUT="$(ngrok config check 2>&1)"; then
+        info "Configuracion de ngrok actualizada y validada."
+      else
+        warn "ngrok config check: ${NGROK_CHECK_OUTPUT//$'\n'/ }"
+      fi
     fi
   else
     warn "ngrok no esta disponible; el MCP local iniciara, pero no tendra URL publica."

@@ -64,6 +64,7 @@ const status = {
   lastTunnelAt: '',
   lastServerExit: null,
   lastNgrokExit: null,
+  ngrokLastOutput: '',
   lastError: ''
 };
 
@@ -76,6 +77,7 @@ let tunnelTimer = null;
 let heartbeatTimer = null;
 let ngrokRestartTimer = null;
 let ngrokRestartDelayMs = 3000;
+let ngrokOutputTail = '';
 let shutdownTimer = null;
 const startupDeadline = Date.now() + HEALTH_START_TIMEOUT_MS;
 
@@ -156,11 +158,14 @@ function log(message, level = 'INFO') {
   process.stderr.write(`${line}\n`);
 }
 
-function attachLogs(child, fileStream, label) {
+function attachLogs(child, fileStream, label, onChunk = null) {
   const forward = (stream, destination) => {
     stream.on('data', (chunk) => {
       try { fileStream.write(chunk); } catch (_) {}
       try { destination.write(`[${label}] ${chunk.toString('utf8')}`); } catch (_) {}
+      if (onChunk) {
+        try { onChunk(chunk.toString('utf8')); } catch (_) {}
+      }
     });
   };
   forward(child.stdout, process.stdout);
@@ -243,10 +248,18 @@ function spawnServer() {
   serverChild.on('exit', (code, signal) => handleFailure({ at: new Date().toISOString(), code, signal }));
 }
 
+function normalizeNgrokUrl(value) {
+  const raw = String(value || '').trim().replace(/\/+$/, '');
+  if (!raw) return '';
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) return raw;
+  return `https://${raw}`;
+}
+
 function ngrokArgs() {
   const args = ['http', `http://${LOCAL_HOST}:${PORT}`, '--log=stdout'];
   if (process.env.NGROK_CONFIG) args.push('--config', process.env.NGROK_CONFIG);
-  if (process.env.NGROK_DOMAIN) args.push('--domain', process.env.NGROK_DOMAIN);
+  const endpointUrl = normalizeNgrokUrl(process.env.NGROK_URL || process.env.NGROK_DOMAIN);
+  if (endpointUrl) args.push('--url', endpointUrl);
   return args;
 }
 
@@ -275,8 +288,13 @@ function spawnNgrok() {
   });
   status.ngrokPid = ngrokChild.pid || null;
   status.ngrokRunning = Boolean(ngrokChild.pid);
+  ngrokOutputTail = '';
+  status.ngrokLastOutput = '';
   persistStatus();
-  attachLogs(ngrokChild, ngrokLog, 'ngrok');
+  attachLogs(ngrokChild, ngrokLog, 'ngrok', (text) => {
+    ngrokOutputTail = redactText(`${ngrokOutputTail}${text}`).slice(-8192);
+    status.ngrokLastOutput = ngrokOutputTail.split(/\r?\n/).slice(-20).join('\n').trim();
+  });
 
   let handled = false;
   const handleFailure = (payload) => {
@@ -285,7 +303,7 @@ function spawnNgrok() {
     status.ngrokRunning = false;
     status.ngrokApiReachable = false;
     status.ngrokPid = null;
-    status.lastNgrokExit = payload;
+    status.lastNgrokExit = { ...payload, output: status.ngrokLastOutput };
     ngrokChild = null;
     setPublicUrl('');
     if (!stopping) scheduleNgrokRestart(`ngrok termino: ${payload.error || payload.signal || payload.code}`);

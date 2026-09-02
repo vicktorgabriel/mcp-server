@@ -84,7 +84,8 @@ function redactText(text) {
   return String(text || '')
     .replace(/(ngrok\s+config\s+add-authtoken\s+)\S+/gi, '$1[REDACTED]')
     .replace(/(authorization\s*:\s*bearer\s+)\S+/gi, '$1[REDACTED]')
-    .replace(/((?:token|password|passwd|secret|api[_-]?key)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi, '$1[REDACTED]');
+    .replace(/((?:authtoken|token|password|passwd|secret|api[_-]?key)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi, '$1[REDACTED]')
+    .replace(/((?:authtoken|token|password|passwd|secret|api[_-]?key)\s+)[^\s,"'}]+/gi, '$1[REDACTED]');
 }
 
 function requestJson(host, port, requestPath, timeoutMs = 2500) {
