@@ -22,6 +22,51 @@ mcp_call() {
   printf '%s\n' "$request" | node mcp-server.js --stdio 2>/tmp/mcp-self-test.stderr
 }
 
+printf '\n== ngrok account auto-detection ==\n'
+(
+  set -euo pipefail
+  TEST_DIR="$(mktemp -d /tmp/mcp-ngrok-account-test.XXXXXX)"
+  cleanup_ngrok_account_test() { rm -rf "$TEST_DIR"; }
+  trap cleanup_ngrok_account_test EXIT
+  cp -a . "$TEST_DIR/repo"
+  rm -rf "$TEST_DIR/repo/.git" "$TEST_DIR/repo/.runtime"
+  FAKE_NGROK="$TEST_DIR/fake-ngrok"
+  cat > "$FAKE_NGROK" <<'FAKE'
+#!/usr/bin/env bash
+if [ "${1:-}" = http ]; then
+  echo 'tunnel session started'
+  trap 'exit 0' TERM INT
+  while :; do sleep 1; done
+fi
+exit 1
+FAKE
+  chmod +x "$FAKE_NGROK"
+  cat > "$TEST_DIR/repo/.env" <<EOF
+PORT=3000
+HOST=127.0.0.1
+ALLOWED_PATHS=$TEST_DIR
+WORKING_DIR=$TEST_DIR
+MCP_FULL_ACCESS=0
+MCP_EXPOSURE_MODE=ngrok
+NGROK_BIN=/wrong/ngrok
+NGROK_CONFIG=/wrong/config.yml
+NGROK_URL=https://example-device.ngrok.dev
+MCP_AUTH_TOKEN=
+EOF
+  (
+    cd "$TEST_DIR/repo"
+    MCP_SERVICE_NAME=mcp-ngrok-account-test.service \
+      MCP_NGROK_REPAIR_TEST=1 MCP_NGROK_ONLY_CANDIDATE=1 \
+      MCP_NGROK_PROBE_LOOPS=5 MCP_NGROK_CANDIDATE_BIN="$FAKE_NGROK" \
+      ./configure-ngrok.sh https://example-device.ngrok.dev >"$TEST_DIR/output" 2>&1
+  )
+  grep -Fxq "NGROK_BIN=$FAKE_NGROK" "$TEST_DIR/repo/.env"
+  grep -Fxq 'NGROK_CONFIG=' "$TEST_DIR/repo/.env"
+  grep -Fxq 'NGROK_URL=https://example-device.ngrok.dev' "$TEST_DIR/repo/.env"
+  grep -q 'NGROK REPARADO Y SINCRONIZADO' "$TEST_DIR/output"
+  echo 'ngrok_account_detection=OK'
+)
+
 printf '\n== Tool inventory ==\n'
 TOOLS_JSON="$(mcp_call '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')"
 printf '%s\n' "$TOOLS_JSON" | node -e '

@@ -120,13 +120,13 @@ URL PARA CHATGPT:
 
 El supervisor reinicia ngrok si se cae mientras la sesión elegida siga activa. En modo temporal, cerrar la terminal termina el túnel; en modo persistente, `systemd` mantiene el conjunto activo y lo inicia con el equipo. El upstream local del MCP es siempre el puerto configurado en `PORT` —por defecto `3000`—; `NGROK_URL` sólo fija la dirección pública. Si usás una URL gratuita aleatoria, puede cambiar al crear un túnel nuevo; consultala con `./mcpctl.sh url` y actualizá el conector en ChatGPT cuando corresponda.
 
-Si `ngrok http 3000 --url https://tu-dominio.ngrok.dev` funciona manualmente pero el launcher devuelve un error de cuenta o plan, normalmente hay dos archivos de configuración con tokens distintos. Sincronizalos sin copiar el token:
+Si `ngrok http 3000 --url https://tu-dominio.ngrok.dev` funciona manualmente pero el launcher devuelve un error de otra cuenta o plan, hay dos binarios o configuraciones de ngrok usando tokens distintos. Cerrá primero el proceso manual y ejecutá:
 
 ```bash
-./configure-ngrok.sh https://tu-dominio.ngrok.dev
+./configure-ngrok.sh
 ```
 
-El script detecta el archivo usado por `ngrok config check`, lo guarda como `NGROK_CONFIG`, mantiene `PORT=3000` y coloca únicamente la URL pública en `NGROK_URL`. El launcher también avisa y ofrece sincronizar automáticamente cuando detecta dos rutas diferentes.
+Aceptá la URL local ya guardada o escribí la correspondiente a ese equipo. El reparador prueba de forma temporal los ejecutables y configuraciones habituales —incluida la instalación Snap—, guarda en `.env` la combinación que realmente funciona y luego ofrece iniciar el MCP en modo temporal. Ni la URL real ni el token se guardan en archivos versionados del repositorio.
 
 ### 2. IP pública/fija o DDNS — sin ngrok
 

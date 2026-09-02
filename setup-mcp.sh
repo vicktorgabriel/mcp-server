@@ -115,65 +115,31 @@ if [ "$MODE" = "ngrok" ]; then
     if [ "$INSTALL_NGROK" = "1" ]; then ./install-ngrok.sh; fi
   fi
 
-  if command -v ngrok >/dev/null 2>&1; then
-    DEFAULT_CHECK_OUTPUT=""
-    DEFAULT_CONFIG_PATH=""
-    if DEFAULT_CHECK_OUTPUT="$(ngrok config check 2>&1)"; then
-      DEFAULT_CONFIG_PATH="$(printf '%s\n' "$DEFAULT_CHECK_OUTPUT" | sed -n 's/^Valid configuration file at //p' | tail -n1)"
-      if [ -n "$DEFAULT_CONFIG_PATH" ]; then
-        DEFAULT_CONFIG_PATH="$(readlink -f "$DEFAULT_CONFIG_PATH" 2>/dev/null || printf '%s' "$DEFAULT_CONFIG_PATH")"
-      fi
-    else
-      warn "La configuracion predeterminada de ngrok no pudo validarse; intento actualizarla automaticamente."
-      ngrok config upgrade >/dev/null 2>&1 || true
-      if DEFAULT_CHECK_OUTPUT="$(ngrok config check 2>&1)"; then
-        DEFAULT_CONFIG_PATH="$(printf '%s\n' "$DEFAULT_CHECK_OUTPUT" | sed -n 's/^Valid configuration file at //p' | tail -n1)"
-        if [ -n "$DEFAULT_CONFIG_PATH" ]; then
-          DEFAULT_CONFIG_PATH="$(readlink -f "$DEFAULT_CONFIG_PATH" 2>/dev/null || printf '%s' "$DEFAULT_CONFIG_PATH")"
-        fi
-        info "Configuracion predeterminada de ngrok actualizada y validada."
-      else
-        warn "ngrok config check: ${DEFAULT_CHECK_OUTPUT//$'\n'/ }"
-      fi
-    fi
+  NGROK_BIN_VALUE="$(read_config NGROK_BIN '')"
+  if [ -z "$NGROK_BIN_VALUE" ]; then
+    NGROK_BIN_VALUE="$(command -v ngrok 2>/dev/null || true)"
+  fi
 
+  if [ -n "$NGROK_BIN_VALUE" ] && [ -x "$NGROK_BIN_VALUE" ]; then
     CONFIGURED_NGROK_CONFIG="$(read_config NGROK_CONFIG '')"
     if [ -n "$CONFIGURED_NGROK_CONFIG" ]; then
       CONFIGURED_NGROK_CONFIG="$(readlink -f "$CONFIGURED_NGROK_CONFIG" 2>/dev/null || printf '%s' "$CONFIGURED_NGROK_CONFIG")"
-    fi
-
-    if [ -n "$DEFAULT_CONFIG_PATH" ] && [ -n "$CONFIGURED_NGROK_CONFIG" ]        && [ "$DEFAULT_CONFIG_PATH" != "$CONFIGURED_NGROK_CONFIG" ]; then
-      warn "Hay dos configuraciones de ngrok distintas."
-      warn "El comando manual usa: $DEFAULT_CONFIG_PATH"
-      warn "El launcher usa:      $CONFIGURED_NGROK_CONFIG"
-      SYNC_CONFIG="${MCP_SYNC_NGROK_CONFIG:-0}"
-      if [ "$INTERACTIVE" = "1" ]; then
-        read -r -p "Usar en el launcher la misma configuracion del comando manual? [S/n]: " SYNC_ANSWER
-        case "${SYNC_ANSWER:-S}" in n|N) SYNC_CONFIG=0 ;; *) SYNC_CONFIG=1 ;; esac
-      fi
-      if [ "$SYNC_CONFIG" = "1" ]; then
-        node - "$DEFAULT_CONFIG_PATH" <<'NODE'
-const fs = require('fs');
-const value = process.argv[2];
-let content = fs.readFileSync('.env', 'utf8');
-if (/^NGROK_CONFIG=/m.test(content)) content = content.replace(/^NGROK_CONFIG=.*$/m, `NGROK_CONFIG=${value}`);
-else content += `\nNGROK_CONFIG=${value}\n`;
-fs.writeFileSync('.env', content);
-NODE
-        CONFIGURED_NGROK_CONFIG="$DEFAULT_CONFIG_PATH"
-        info "NGROK_CONFIG sincronizado con el comando manual."
+      EFFECTIVE_CHECK_OUTPUT=""
+      if EFFECTIVE_CHECK_OUTPUT="$("$NGROK_BIN_VALUE" config check --config "$CONFIGURED_NGROK_CONFIG" 2>&1)"; then
+        info "Configuracion de ngrok validada: $CONFIGURED_NGROK_CONFIG"
       else
-        warn "Se mantiene la configuracion indicada en .env. Para sincronizar luego: ./configure-ngrok.sh"
-      fi
-    fi
-
-    EFFECTIVE_CHECK_OUTPUT=""
-    if [ -n "$CONFIGURED_NGROK_CONFIG" ]; then
-      if ! EFFECTIVE_CHECK_OUTPUT="$(ngrok config check --config "$CONFIGURED_NGROK_CONFIG" 2>&1)"; then
         warn "La configuracion efectiva de ngrok no es valida: ${EFFECTIVE_CHECK_OUTPUT//$'\n'/ }"
+        warn "No la reemplazo automaticamente. Ejecuta: ./configure-ngrok.sh"
       fi
-    elif ! EFFECTIVE_CHECK_OUTPUT="$(ngrok config check 2>&1)"; then
-      warn "La configuracion efectiva de ngrok no es valida: ${EFFECTIVE_CHECK_OUTPUT//$'\n'/ }"
+    else
+      DEFAULT_CHECK_OUTPUT=""
+      if DEFAULT_CHECK_OUTPUT="$("$NGROK_BIN_VALUE" config check 2>&1)"; then
+        DEFAULT_CONFIG_PATH="$(printf '%s\n' "$DEFAULT_CHECK_OUTPUT" | sed -n 's/^Valid configuration file at //p' | tail -n1)"
+        [ -z "$DEFAULT_CONFIG_PATH" ] || info "Configuracion predeterminada de ngrok: $DEFAULT_CONFIG_PATH"
+      else
+        warn "La configuracion predeterminada de ngrok no pudo validarse: ${DEFAULT_CHECK_OUTPUT//$'\n'/ }"
+        warn "Ejecuta: ./configure-ngrok.sh"
+      fi
     fi
   else
     warn "ngrok no esta disponible; el MCP local iniciara, pero no tendra URL publica."
