@@ -1,11 +1,11 @@
 {
   "name": "mcp-server-local",
-  "version": "3.3.0",
+  "version": "3.3.1",
   "description": "MCP local full-control para ChatGPT, Codex, Claude y otros clientes MCP",
   "main": "mcp-server.js",
   "scripts": {
     "test": "npm run check",
-    "check": "node --check mcp-server.js && node --check full-control-tools.js && node --check runtime-diagnostics.js && node --check mcp-supervisor.js && python3 -m py_compile desktop-control.py && bash -n start-mcp.sh && bash -n setup-mcp.sh && bash -n install-service.sh && bash -n mcpctl.sh && bash -n install-deps.sh && bash -n install-ngrok.sh && bash -n self-test.sh",
+    "check": "node --check mcp-server.js && node --check full-control-tools.js && node --check runtime-diagnostics.js && node --check mcp-supervisor.js && python3 -m py_compile desktop-control.py && bash -n start-mcp.sh && bash -n setup-mcp.sh && bash -n configure-ngrok.sh && bash -n install-service.sh && bash -n mcpctl.sh && bash -n install-deps.sh && bash -n install-ngrok.sh && bash -n self-test.sh",
     "selftest": "./self-test.sh",
     "start": "node mcp-server.js --http",
     "stdio": "node mcp-server.js --stdio",

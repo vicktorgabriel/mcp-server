@@ -120,6 +120,14 @@ URL PARA CHATGPT:
 
 El supervisor reinicia ngrok si se cae mientras la sesión elegida siga activa. En modo temporal, cerrar la terminal termina el túnel; en modo persistente, `systemd` mantiene el conjunto activo y lo inicia con el equipo. El upstream local del MCP es siempre el puerto configurado en `PORT` —por defecto `3000`—; `NGROK_URL` sólo fija la dirección pública. Si usás una URL gratuita aleatoria, puede cambiar al crear un túnel nuevo; consultala con `./mcpctl.sh url` y actualizá el conector en ChatGPT cuando corresponda.
 
+Si `ngrok http 3000 --url https://tu-dominio.ngrok.dev` funciona manualmente pero el launcher devuelve un error de cuenta o plan, normalmente hay dos archivos de configuración con tokens distintos. Sincronizalos sin copiar el token:
+
+```bash
+./configure-ngrok.sh https://tu-dominio.ngrok.dev
+```
+
+El script detecta el archivo usado por `ngrok config check`, lo guarda como `NGROK_CONFIG`, mantiene `PORT=3000` y coloca únicamente la URL pública en `NGROK_URL`. El launcher también avisa y ofrece sincronizar automáticamente cuando detecta dos rutas diferentes.
+
 ### 2. IP pública/fija o DDNS — sin ngrok
 
 Podés prescindir de ngrok si ya tenés una **URL HTTPS pública** que llegue a la máquina.
@@ -387,7 +395,7 @@ npm test
 
 ## Diagnóstico de errores 502
 
-Un `502 Upstream or external service errors` suele significar que la URL pública existe, pero ngrok no puede llegar al servidor local, el proceso murió o el conector conserva una URL gratuita anterior. En ngrok v3 actual, una URL reservada se pasa con `--url`; el launcher actual conserva compatibilidad con configuraciones anteriores que usaban `NGROK_DOMAIN`. Ejecutá:
+Un `502 Upstream or external service errors` suele significar que la URL pública existe, pero ngrok no puede llegar al servidor local, el proceso murió o el conector conserva una URL anterior. Si el comando manual funciona pero el launcher muestra otra cuenta de ngrok, ejecutá primero `./configure-ngrok.sh URL_PUBLICA`: eso corrige la ruta del token sin mostrarlo. En ngrok v3 actual, una URL reservada se pasa con `--url`; el launcher conserva compatibilidad con configuraciones anteriores que usaban `NGROK_DOMAIN`. Ejecutá:
 
 ```bash
 ./mcpctl.sh status
