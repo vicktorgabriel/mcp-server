@@ -17,7 +17,11 @@ mcp_call() {
 printf '\n== Tool inventory ==\n'
 TOOLS_JSON="$(mcp_call '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')"
 printf '%s\n' "$TOOLS_JSON" | node -e '
-let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); const names=j.result.tools.map(t=>t.name); console.log(`tools=${names.length}`); console.log(names.join(", ")); if(names.length < 40) process.exit(2);});'
+let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); const names=j.result.tools.map(t=>t.name); console.log(`tools=${names.length}`); console.log(names.join(", ")); const required=["mcp_runtime_status","mcp_runtime_logs"]; if(names.length < 51 || required.some(name=>!names.includes(name))) process.exit(2);});'
+
+printf '\n== Runtime diagnostics ==\n'
+mcp_call '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"mcp_runtime_status","arguments":{}}}' \
+  | node -e 'let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); if(j.error) throw new Error(j.error.message); const x=j.result.structuredContent; if(!x || !x.config || !x.local || !x.tunnel) throw new Error("runtime status incomplete"); console.log(`runtime_status=OK mode=${x.config.exposureMode}`);});'
 
 printf '\n== Capability probe ==\n'
 mcp_call '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"control_capabilities","arguments":{}}}' \

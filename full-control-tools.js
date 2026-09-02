@@ -14,6 +14,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const { collectRuntimeLogs, collectRuntimeStatus } = require('./runtime-diagnostics');
 
 const HELPER = path.join(__dirname, 'desktop-control.py');
 const DEFAULT_TIMEOUT_MS = numberEnv('MCP_CONTROL_TIMEOUT_MS', 120000, 1000, 600000);
@@ -170,6 +171,10 @@ function createFullControl({ resolvePath, buildToolMetadata, textResult }) {
   const tools = [
     // Capability / diagnostics
     makeTool(buildToolMetadata, 'control_capabilities', 'Control Capabilities', 'Probes which full-control backends are available on this machine (desktop, tmux, git, camera, audio, system tools).', {}, [], ro),
+    makeTool(buildToolMetadata, 'mcp_runtime_status', 'MCP Runtime Status', 'Diagnoses this MCP server, its persistent systemd service, local health endpoint and ngrok/public URL without exposing tokens.', {}, [], ro),
+    makeTool(buildToolMetadata, 'mcp_runtime_logs', 'MCP Runtime Logs', 'Returns redacted recent logs for the MCP service, server and ngrok tunnel.', {
+      lines: { type: 'number', description: 'Default 200, max 5000.' }
+    }, [], ro),
 
     // Files / binary / logs
     makeTool(buildToolMetadata, 'file_info', 'File Info', 'Returns stat metadata for a file or directory.', {
@@ -445,6 +450,10 @@ function createFullControl({ resolvePath, buildToolMetadata, textResult }) {
           note: 'All tools run with the permissions of the MCP server user; root-only actions still require OS authorization.'
         });
       }
+      case 'mcp_runtime_status':
+        return textResult(await collectRuntimeStatus());
+      case 'mcp_runtime_logs':
+        return textResult(await collectRuntimeLogs(clampInt(args.lines, 200, 1, 5000)));
       case 'file_info': {
         const { fullPath, displayPath } = resolvePath(args.path);
         const s = fs.statSync(fullPath);

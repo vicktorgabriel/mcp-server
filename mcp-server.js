@@ -16,6 +16,7 @@ const path = require('path');
 const readline = require('readline');
 const { URL } = require('url');
 const { createFullControl } = require('./full-control-tools');
+const PACKAGE_VERSION = require('./package.json').version;
 
 loadDotEnv();
 
@@ -612,7 +613,7 @@ class MCPFileServer {
       capabilities: { tools: { listChanged: false } },
       serverInfo: {
         name: 'mcp-local-control',
-        version: '3.1.0'
+        version: PACKAGE_VERSION
       }
     };
   }
@@ -1038,6 +1039,7 @@ function startHttp() {
       if (url.pathname === '/health' && req.method === 'GET') {
         sendJson(res, 200, {
           ok: true,
+          version: PACKAGE_VERSION,
           transport: ['streamable-http', 'sse'],
           allowedRoots: ALLOWED_ROOTS,
           auth: AUTH_TOKEN ? 'bearer' : 'none',

@@ -35,9 +35,37 @@ El launcher:
 4. crea `.env` en el primer arranque;
 5. pregunta si querés acceso restringido o full-control;
 6. pregunta cómo vas a publicar el MCP: ngrok, URL HTTPS propia o sólo local;
-7. inicia el servidor y muestra en la terminal la URL exacta que hay que copiar a ChatGPT.
+7. instala o actualiza `mcp-local.service`;
+8. inicia el supervisor, el servidor MCP y ngrok;
+9. muestra la URL exacta que hay que copiar a ChatGPT y vuelve al prompt.
 
-Algunas instalaciones de paquetes pueden pedir la contraseña de administrador mediante `sudo`/Polkit.
+El servicio queda habilitado para el arranque del sistema. Cerrar la terminal o la ventana VNC no detiene MCP ni ngrok. Algunas instalaciones de paquetes pueden pedir la contraseña de administrador mediante `sudo`/Polkit.
+
+## Servicio persistente y comandos de control
+
+El inicio normal es persistente:
+
+```bash
+./start-mcp.sh
+```
+
+El comando instala o actualiza la unidad `mcp-local.service`, migra procesos antiguos iniciados desde una terminal y deja todo funcionando en segundo plano. Para administrarlo:
+
+```bash
+./mcpctl.sh status
+./mcpctl.sh url
+./mcpctl.sh logs
+./mcpctl.sh restart
+./mcpctl.sh stop
+```
+
+`./mcpctl.sh logs` muestra las últimas líneas y termina; no deja la terminal enganchada. `./mcpctl.sh logs-follow` sigue el journal hasta `Ctrl+C`, pero cerrar esa vista tampoco detiene el servicio.
+
+El modo anterior, unido a la terminal, sigue disponible sólo para depuración:
+
+```bash
+./start-mcp.sh --foreground
+```
 
 ## ¿Necesito ngrok?
 
@@ -65,14 +93,14 @@ Luego:
 ./start-mcp.sh
 ```
 
-La terminal mostrará algo similar a:
+El instalador levanta ngrok dentro del servicio persistente y mostrará algo similar a:
 
 ```text
 URL PARA CHATGPT:
   https://xxxx.ngrok-free.app/mcp
 ```
 
-El túnel existe sólo mientras ngrok esté ejecutándose. Si usás el dominio gratuito de ngrok, la URL puede cambiar al crear un túnel nuevo; en ese caso actualizá la URL del conector en ChatGPT.
+El supervisor reinicia ngrok si se cae y `systemd` reinicia el conjunto después de un fallo o reinicio del VPS. Si usás el dominio gratuito de ngrok, la URL puede cambiar al crear un túnel nuevo; consultala con `./mcpctl.sh url` y actualizá el conector en ChatGPT cuando corresponda.
 
 ### 2. IP pública/fija o DDNS — sin ngrok
 
@@ -204,7 +232,7 @@ No publiques un MCP full-control sin entender qué estás exponiendo. Cerrá el 
 
 ## Herramientas disponibles
 
-Actualmente expone 49 herramientas.
+Actualmente expone 51 herramientas.
 
 ### Archivos
 
@@ -214,7 +242,9 @@ Actualmente expone 49 herramientas.
 
 ### Sistema
 
-`control_capabilities`, `system_snapshot`, `hardware_info`, `disk_usage`, `network_status`, `gpu_status`, `process_list`, `process_info`, `process_signal`, `process_start`, `service_status`, `service_action`, `journal_tail`.
+`control_capabilities`, `mcp_runtime_status`, `mcp_runtime_logs`, `system_snapshot`, `hardware_info`, `disk_usage`, `network_status`, `gpu_status`, `process_list`, `process_info`, `process_signal`, `process_start`, `service_status`, `service_action`, `journal_tail`.
+
+`mcp_runtime_status` comprueba en una sola llamada el servicio, el health local, los sockets, el supervisor y el túnel HTTPS. `mcp_runtime_logs` devuelve journal y logs recientes con redacción básica de tokens y contraseñas.
 
 ### Git
 
@@ -323,6 +353,8 @@ git pull
 ./start-mcp.sh
 ```
 
+`./start-mcp.sh` vuelve a instalar la unidad con las rutas y la versión actuales, reinicia MCP/ngrok y regresa al prompt. No hace falta dejar una terminal abierta.
+
 O para probar antes:
 
 ```bash
@@ -330,6 +362,26 @@ git pull
 npm test
 ./self-test.sh
 ```
+
+
+## Diagnóstico de errores 502
+
+Un `502 Upstream or external service errors` suele significar que la URL pública existe, pero ngrok no puede llegar al servidor local, el proceso murió o el conector conserva una URL gratuita anterior. Ejecutá:
+
+```bash
+./mcpctl.sh status
+./mcpctl.sh url
+./mcpctl.sh logs
+```
+
+Desde el propio MCP también están disponibles:
+
+```text
+mcp_runtime_status
+mcp_runtime_logs
+```
+
+El estado sano debe mostrar `mcp-local.service` activo, `/health` con HTTP 200 y una URL HTTPS terminada en `/mcp`.
 
 ## Pruebas
 
