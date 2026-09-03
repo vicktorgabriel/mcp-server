@@ -14,8 +14,9 @@ function authInstructions(mode) {
   if (mode === 'oauth') {
     return [
       'Autenticación: elegí OAuth.',
-      'El servidor publica registro dinámico de clientes. En interfaces compatibles, ChatGPT se registra automáticamente.',
-      'Si la interfaz muestra campos de Client ID/Secret en lugar de iniciar el registro automático, revisá la compatibilidad de tu versión de ChatGPT antes de continuar.',
+      'El servidor admite CIMD de ChatGPT y DCR como fallback; no cargues un Client ID manual salvo que uses un cliente pre-registrado.',
+      'Con CIMD ChatGPT usa su URL HTTPS de metadatos como client_id y no realiza un POST de registro.',
+      'Con DCR ChatGPT se registra automáticamente mediante el registration_endpoint publicado.',
       'Al escanear las herramientas se abrirá la página de autorización del MCP.',
       'Ingresá el usuario y la contraseña OAuth que configuraste en el primer inicio, revisá el destino y autorizá.'
     ];

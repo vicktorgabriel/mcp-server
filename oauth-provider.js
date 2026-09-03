@@ -4,6 +4,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const net = require('net');
 const { URL, URLSearchParams } = require('url');
 const { humanEvent, redactText } = require('./human-log');
 const { applyPrivateOwnership, ensurePrivateDirectory } = require('./private-owner');
@@ -205,6 +206,66 @@ function isSafeRedirectUri(raw) {
   }
 }
 
+function boundedNumber(value, fallback, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, Math.trunc(number)));
+}
+
+function parseCimdHosts(value) {
+  const raw = String(value || 'chatgpt.com').split(',').map((item) => item.trim().toLowerCase()).filter(Boolean);
+  return new Set(raw.length ? raw : ['chatgpt.com']);
+}
+
+function validateCimdClientId(raw, allowedHosts) {
+  let parsed;
+  try { parsed = new URL(String(raw || '')); }
+  catch (_) { return null; }
+  if (parsed.protocol !== 'https:') return null;
+  if (parsed.username || parsed.password || parsed.hash || parsed.search) return null;
+  const hostname = parsed.hostname.toLowerCase();
+  if (net.isIP(hostname) || hostname === 'localhost' || hostname.endsWith('.localhost') || hostname.endsWith('.local')) return null;
+  if (!allowedHosts.has(hostname)) return null;
+  if (!parsed.pathname || parsed.pathname === '/' || parsed.pathname.includes('/../') || parsed.pathname.includes('/./')) return null;
+  return parsed.toString();
+}
+
+async function defaultCimdFetcher(url, { timeoutMs = 5000, maxBytes = 32768 } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      redirect: 'error',
+      signal: controller.signal,
+      headers: { accept: 'application/json' }
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const contentLength = Number(response.headers.get('content-length') || 0);
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) throw new Error('documento demasiado grande');
+    const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+    let raw = '';
+    if (reader) {
+      const decoder = new TextDecoder();
+      let bytes = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+        if (bytes > maxBytes) throw new Error('documento demasiado grande');
+        raw += decoder.decode(value, { stream: true });
+      }
+      raw += decoder.decode();
+    } else {
+      raw = await response.text();
+      if (Buffer.byteLength(raw) > maxBytes) throw new Error('documento demasiado grande');
+    }
+    return JSON.parse(raw);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function htmlEscape(value) {
   return String(value || '')
     .replace(/&/g, '&amp;')
@@ -391,6 +452,16 @@ class OAuthProvider {
     this.dynamicRegistration = options.dynamicRegistration !== undefined
       ? Boolean(options.dynamicRegistration)
       : String(process.env.MCP_OAUTH_DYNAMIC_REGISTRATION || '1') !== '0';
+    this.cimdEnabled = options.cimdEnabled !== undefined
+      ? Boolean(options.cimdEnabled)
+      : String(process.env.MCP_OAUTH_CIMD || '1') !== '0';
+    this.cimdHosts = options.cimdHosts instanceof Set
+      ? options.cimdHosts
+      : parseCimdHosts(options.cimdHosts || process.env.MCP_OAUTH_CIMD_HOSTS || 'chatgpt.com');
+    this.cimdFetcher = typeof options.cimdFetcher === 'function' ? options.cimdFetcher : defaultCimdFetcher;
+    this.cimdTimeoutMs = boundedNumber(options.cimdTimeoutMs || process.env.MCP_OAUTH_CIMD_TIMEOUT_MS, 5000, 1000, 15000);
+    this.cimdMaxBytes = boundedNumber(options.cimdMaxBytes || process.env.MCP_OAUTH_CIMD_MAX_BYTES, 32768, 4096, 262144);
+    this.cimdCacheTtl = boundedNumber(options.cimdCacheTtl || process.env.MCP_OAUTH_CIMD_CACHE_TTL, 21600, 60, 86400);
     this.loginLimiter = new SlidingWindowLimiter(5, 600, 900);
     this.registrationLimiter = new SlidingWindowLimiter(20, 3600, 3600);
     this.authorizationLimiter = new SlidingWindowLimiter(60, 600, 600);
@@ -425,6 +496,7 @@ class OAuthProvider {
       issuer,
       authorization_endpoint: `${issuer}/oauth/authorize`,
       token_endpoint: `${issuer}/oauth/token`,
+      client_id_metadata_document_supported: this.cimdEnabled,
       registration_endpoint: this.dynamicRegistration ? `${issuer}/oauth/register` : undefined,
       revocation_endpoint: `${issuer}/oauth/revoke`,
       response_types_supported: ['code'],
@@ -460,7 +532,8 @@ class OAuthProvider {
       clients: Object.keys(this.store.state.clients).length,
       activeAccessTokens: Object.keys(this.store.state.accessTokens).length,
       activeRefreshTokens: Object.keys(this.store.state.refreshTokens).length,
-      dynamicRegistration: this.dynamicRegistration
+      dynamicRegistration: this.dynamicRegistration,
+      clientIdMetadataDocuments: this.cimdEnabled
     };
   }
 
@@ -687,6 +760,7 @@ ${this.accessRiskNotice()}
       humanEvent('OAUTH', `Se registró el cliente ${clientName} para iniciar la autorización.`);
       sendJson(res, 201, this.clientRegistrationResponse(record, rawSecret));
     } catch (error) {
+      humanEvent('SEGURIDAD', `Falló el registro dinámico OAuth desde ${ip}: ${redactText(error.message)}`);
       this.sendOAuthError(res, error);
     }
   }
@@ -710,6 +784,89 @@ ${this.accessRiskNotice()}
     return response;
   }
 
+  async resolveClient(clientId, { redirectUri = '' } = {}) {
+    const rawId = String(clientId || '');
+    if (!rawId) return null;
+    const existing = this.store.state.clients[rawId];
+    if (existing && existing.registrationType !== 'cimd') return existing;
+
+    const cimdUrl = this.cimdEnabled ? validateCimdClientId(rawId, this.cimdHosts) : null;
+    if (!cimdUrl) return existing || null;
+
+    const now = nowSeconds();
+    if (existing && Number(existing.cimdValidatedAt || 0) + this.cimdCacheTtl > now) {
+      if (!redirectUri || existing.redirectUris.includes(redirectUri)) return existing;
+    }
+
+    let metadata;
+    try {
+      metadata = await this.cimdFetcher(cimdUrl, { timeoutMs: this.cimdTimeoutMs, maxBytes: this.cimdMaxBytes });
+    } catch (error) {
+      humanEvent('SEGURIDAD', `No se pudo verificar el documento CIMD ${cimdUrl}: ${redactText(error.message)}`);
+      throw new OAuthError('unauthorized_client', 'No se pudo verificar la identidad OAuth de ChatGPT. Reintentá la conexión.', 400);
+    }
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      throw new OAuthError('unauthorized_client', 'El documento CIMD no contiene metadatos OAuth válidos.');
+    }
+    if (!timingSafeTextEqual(String(metadata.client_id || ''), cimdUrl)) {
+      throw new OAuthError('unauthorized_client', 'El client_id del documento CIMD no coincide con su URL.');
+    }
+    const clientName = String(metadata.client_name || '').replace(/[\r\n\t]/g, ' ').trim().slice(0, 120);
+    if (!clientName) throw new OAuthError('unauthorized_client', 'El documento CIMD no declara client_name.');
+    const redirectUris = Array.isArray(metadata.redirect_uris)
+      ? [...new Set(metadata.redirect_uris.map(String))]
+      : [];
+    if (redirectUris.length < 1 || redirectUris.length > 10 || redirectUris.some((uri) => uri.length > 2048 || !isSafeRedirectUri(uri))) {
+      throw new OAuthError('unauthorized_client', 'El documento CIMD contiene redirect_uris no válidas.');
+    }
+    if (redirectUri && !redirectUris.includes(redirectUri)) {
+      throw new OAuthError('invalid_request', 'redirect_uri no coincide con el documento CIMD del cliente.');
+    }
+    const grantTypes = Array.isArray(metadata.grant_types) ? [...new Set(metadata.grant_types.map(String))] : ['authorization_code'];
+    if (!grantTypes.includes('authorization_code') || grantTypes.some((value) => !['authorization_code', 'refresh_token'].includes(value))) {
+      throw new OAuthError('unauthorized_client', 'El documento CIMD declara grant_types no compatibles.');
+    }
+    const responseTypes = Array.isArray(metadata.response_types) ? [...new Set(metadata.response_types.map(String))] : ['code'];
+    if (!responseTypes.includes('code') || responseTypes.some((value) => value !== 'code')) {
+      throw new OAuthError('unauthorized_client', 'El documento CIMD declara response_types no compatibles.');
+    }
+    const clientMethods = Array.isArray(metadata.token_endpoint_auth_methods_supported)
+      ? metadata.token_endpoint_auth_methods_supported.map(String)
+      : [String(metadata.token_endpoint_auth_method || 'none')];
+    if (!clientMethods.includes('none')) {
+      throw new OAuthError('unauthorized_client', 'Este servidor requiere que el cliente CIMD permita token_endpoint_auth_method=none.');
+    }
+
+    if (!existing && Object.keys(this.store.state.clients).length >= this.maxClients) {
+      this.pruneUnusedClients();
+      if (Object.keys(this.store.state.clients).length >= this.maxClients) {
+        throw new OAuthError('unauthorized_client', 'Se alcanzó el máximo de clientes OAuth activos. Revocá conexiones antiguas.');
+      }
+    }
+
+    const record = {
+      clientId: cimdUrl,
+      clientName,
+      redirectUris,
+      grantTypes,
+      responseTypes,
+      tokenEndpointAuthMethod: 'none',
+      clientSecretHash: '',
+      applicationType: 'web',
+      scope: `${DEFAULT_SCOPE} ${OFFLINE_SCOPE}`,
+      clientUri: typeof metadata.client_uri === 'string' ? metadata.client_uri.slice(0, 2048) : '',
+      registrationType: 'cimd',
+      cimdMetadataUrl: cimdUrl,
+      cimdValidatedAt: now,
+      issuedAt: existing && existing.issuedAt ? existing.issuedAt : now,
+      createdAt: existing && existing.createdAt ? existing.createdAt : new Date().toISOString()
+    };
+    this.store.state.clients[cimdUrl] = record;
+    this.store.save();
+    humanEvent('OAUTH', `Se verificó el cliente CIMD ${clientName} mediante ${cimdUrl}.`);
+    return record;
+  }
+
   pruneAuthorizationTransactions(targetCount = this.maxTransactions - 1) {
     const transactions = Object.entries(this.store.state.authorizationTransactions || {})
       .sort((left, right) => Number(left[1].issuedAt || 0) - Number(right[1].issuedAt || 0));
@@ -719,11 +876,14 @@ ${this.accessRiskNotice()}
     }
   }
 
-  validateAuthorizationRequest(url, issuer) {
+  async validateAuthorizationRequest(url, issuer) {
     const clientId = String(url.searchParams.get('client_id') || '');
-    const client = this.store.state.clients[clientId];
-    if (!client) throw new OAuthError('unauthorized_client', 'El cliente OAuth no está registrado.');
     const redirectUri = String(url.searchParams.get('redirect_uri') || '');
+    const client = await this.resolveClient(clientId, { redirectUri });
+    if (!client) {
+      humanEvent('SEGURIDAD', `ChatGPT intentó autorizar un client_id no registrado (${clientId.startsWith('https://') ? 'URL CIMD no admitida' : 'posible cliente DCR obsoleto'}).`);
+      throw new OAuthError('unauthorized_client', 'El cliente OAuth no está registrado. Si este conector ya existía, eliminá la app anterior de ChatGPT y creala nuevamente.');
+    }
     if (!client.redirectUris.includes(redirectUri)) throw new OAuthError('invalid_request', 'redirect_uri no coincide con el registro del cliente.');
     if (String(url.searchParams.get('response_type') || '') !== 'code') throw new OAuthError('unsupported_response_type', 'Sólo se admite response_type=code.');
     const challenge = String(url.searchParams.get('code_challenge') || '');
@@ -766,7 +926,7 @@ ${this.accessRiskNotice()}
     try {
       this.refreshStore();
       this.assertConfigured();
-      const request = this.validateAuthorizationRequest(url, issuer);
+      const request = await this.validateAuthorizationRequest(url, issuer);
       if (Object.keys(this.store.state.authorizationTransactions).length >= this.maxTransactions) {
         this.pruneAuthorizationTransactions();
       }
@@ -785,6 +945,7 @@ ${this.accessRiskNotice()}
       this.store.save();
       sendHtml(res, 200, this.renderAuthorizationPage(transactionId, request.client, request.redirectUri));
     } catch (error) {
+      humanEvent('SEGURIDAD', `No se pudo iniciar la autorización OAuth desde ${ip}: ${redactText(error.message)}`);
       this.sendOAuthError(res, error, true);
     }
   }
@@ -877,7 +1038,7 @@ ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
     }
   }
 
-  authenticateClient(req, form) {
+  async authenticateClient(req, form) {
     let clientId = String(form.get('client_id') || '');
     let secret = String(form.get('client_secret') || '');
     const authorization = String(req.headers.authorization || '');
@@ -892,8 +1053,8 @@ ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
       }
     }
 
-    const client = this.store.state.clients[clientId];
-    if (!client) throw new OAuthError('invalid_client', 'Cliente OAuth desconocido.', 401);
+    const client = await this.resolveClient(clientId, { redirectUri: String(form.get('redirect_uri') || '') });
+    if (!client) throw new OAuthError('invalid_client', 'Cliente OAuth desconocido. Si ChatGPT reutiliza un client_id DCR anterior, eliminá y recreá la app.', 401);
     if (client.tokenEndpointAuthMethod !== 'none') {
       if (!secret || !timingSafeTextEqual(tokenHash(secret), client.clientSecretHash)) {
         throw new OAuthError('invalid_client', 'El secreto del cliente no es válido.', 401);
@@ -913,7 +1074,7 @@ ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
     try {
       const form = await readForm(req, 64 * 1024);
       this.refreshStore();
-      const client = this.authenticateClient(req, form);
+      const client = await this.authenticateClient(req, form);
       const grantType = String(form.get('grant_type') || '');
       let response;
       if (grantType === 'authorization_code') {

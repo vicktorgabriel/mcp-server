@@ -121,6 +121,8 @@ async function main() {
     assert.equal(authorizationMetadata.authorization_response_iss_parameter_supported, true);
     assert.equal(authorizationMetadata.resource_indicators_supported, true);
     assert.ok(authorizationMetadata.response_modes_supported.includes('query'));
+    assert.equal(authorizationMetadata.client_id_metadata_document_supported, true);
+    assert.ok(authorizationMetadata.token_endpoint_auth_methods_supported.includes('none'));
     assert.equal(authorizationMetadata.registration_endpoint, `${base}/oauth/register`);
 
     const redirectUri = 'http://127.0.0.1:45891/callback';

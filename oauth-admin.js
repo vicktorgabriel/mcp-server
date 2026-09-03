@@ -76,10 +76,13 @@ function statusSnapshot() {
   const admin = store.state.admin;
   const now = Math.floor(Date.now() / 1000);
   const active = (collection) => Object.values(collection).filter((record) => Number(record.expiresAt || 0) > now).length;
+  const clients = Object.values(store.state.clients);
   return {
     configured: Boolean(admin && admin.username && admin.passwordHash),
     username: admin ? admin.username : '',
-    registeredClients: Object.keys(store.state.clients).length,
+    registeredClients: clients.length,
+    cimdClients: clients.filter((client) => client && client.registrationType === 'cimd').length,
+    dcrClients: clients.filter((client) => !client || client.registrationType !== 'cimd').length,
     activeSessions: active(store.state.accessTokens),
     activeRefreshTokens: active(store.state.refreshTokens),
     storePath: store.filePath
@@ -95,7 +98,7 @@ function printStatus({ json = false } = {}) {
   process.stdout.write(`${[
     `Configurado: ${status.configured ? 'sí' : 'no'}`,
     `Usuario: ${status.username || '-'}`,
-    `Clientes registrados: ${status.registeredClients}`,
+    `Clientes registrados: ${status.registeredClients} (CIMD: ${status.cimdClients}, DCR: ${status.dcrClients})`,
     `Sesiones activas: ${status.activeSessions}`,
     `Renovaciones activas: ${status.activeRefreshTokens}`,
     `Archivo privado: ${status.storePath}`

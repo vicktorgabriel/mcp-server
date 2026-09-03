@@ -1,10 +1,10 @@
 # MCP Local Full Control
 
-> **4.2.1:** corrige la validación OAuth en Node.js 24. El inicio ya no conecta la salida detallada de `oauth-admin.js status` con `grep -q`; utiliza una comprobación silenciosa y tolera correctamente una tubería cerrada, evitando el falso mensaje de que faltan usuario o contraseña.
+> **4.3.0:** agrega compatibilidad con **CIMD (Client ID Metadata Documents)** de ChatGPT sin quitar DCR. Esto corrige el caso en que ChatGPT llega a `/oauth/authorize` con un `client_id` HTTPS propio y el servidor anterior respondía “El cliente OAuth no está registrado”. DCR continúa disponible como fallback.
 
 Servidor MCP para administrar un equipo propio desde ChatGPT y otros clientes compatibles. Expone herramientas de archivos, comandos, procesos, servicios, Git, tmux, escritorio, captura de pantalla, cámara, audio y diagnóstico del sistema.
 
-La versión 4.2 agrega:
+La versión 4.3 agrega:
 
 - un panel de inicio con logo, versión, cantidad de herramientas, perfil, cuenta, confirmaciones y estado de actualización;
 - configuración inicial completa en **una sola terminal**;
@@ -15,7 +15,7 @@ La versión 4.2 agrega:
 - comprobación de actualizaciones en segundo plano, con aviso de color cuando hay una versión nueva;
 - arranque y detección de capacidades optimizados;
 - guardado automático del endpoint de ngrok;
-- OAuth 2.1 integrado para ChatGPT;
+- OAuth 2.1 integrado para ChatGPT con CIMD + DCR, PKCE y refresh tokens;
 - modo temporal o servicio persistente;
 - registros explicados en lenguaje legible;
 - separación estricta entre configuración pública del repositorio y secretos locales.
@@ -194,7 +194,8 @@ El servidor incluye un proveedor OAuth para la cuenta administradora local. Impl
 - PKCE con `S256`;
 - Protected Resource Metadata;
 - Authorization Server Metadata;
-- registro dinámico de clientes;
+- Client ID Metadata Documents (CIMD) para la identidad estable de ChatGPT;
+- registro dinámico de clientes (DCR) como fallback;
 - tokens de acceso de corta duración;
 - refresh tokens rotativos y detección de reutilización, con revocación de toda la familia de sesión;
 - validación estricta del recurso `/mcp`;
@@ -205,7 +206,9 @@ El servidor incluye un proveedor OAuth para la cuenta administradora local. Impl
 
 En el asistente elegí OAuth, definí un usuario y una contraseña distinta de la contraseña del sistema. Cuando ChatGPT escanee las herramientas, se abrirá la página de autorización del propio MCP. Esa pantalla muestra el destino, el perfil elegido, la cantidad de herramientas y alertas rojas si se habilitaron `root` o las confirmaciones desactivadas; revisalos antes de autorizar.
 
-El proveedor integrado está orientado a una instalación privada y de un solo administrador. Para publicar un servicio multiusuario, empresarial o de terceros, conviene usar un proveedor de identidad establecido y auditar su configuración por separado. El modo integrado anuncia DCR para que ChatGPT pueda registrar la conexión; no anuncia CIMD ni `private_key_jwt`.
+El proveedor integrado está orientado a una instalación privada y de un solo administrador. Para publicar un servicio multiusuario, empresarial o de terceros, conviene usar un proveedor de identidad establecido y auditar su configuración por separado.
+
+El modo integrado anuncia **CIMD y DCR al mismo tiempo**. Para CIMD acepta por defecto documentos alojados en `chatgpt.com`, valida que el `client_id` coincida exactamente con la URL, comprueba las `redirect_uris`, PKCE y los métodos de autenticación publicados, y utiliza `token_endpoint_auth_method=none` porque el documento actual de ChatGPT declara compatibilidad tanto con `none` como con `private_key_jwt`. No hace falta guardar un `client_secret` de ChatGPT. La lista de hosts CIMD se puede ampliar conscientemente con `MCP_OAUTH_CIMD_HOSTS`, pero mantenerla restringida evita convertir el servidor OAuth en un fetcher arbitrario.
 
 Comandos de administración:
 
@@ -392,6 +395,26 @@ El asistente guarda el ejecutable, el authtoken privado y el endpoint correcto p
 
 Un 502 suele indicar que el túnel existe pero no puede llegar al servidor local. El estado correcto muestra health local operativo y ngrok apuntando a `http://127.0.0.1:3000` o al puerto elegido.
 
+### “El cliente OAuth no está registrado”
+
+Desde 2026 ChatGPT puede usar dos mecanismos de identificación OAuth: CIMD o DCR. En CIMD **no existe un POST de registro**: ChatGPT envía una URL HTTPS de metadatos como `client_id`. Las versiones anteriores a 4.3.0 sólo conocían los IDs DCR guardados localmente y rechazaban ese flujo.
+
+Actualizá el servidor y reinicialo:
+
+```bash
+git pull --ff-only
+bash start-mcp.sh
+```
+
+La versión 4.3.0 acepta CIMD de ChatGPT y conserva DCR como fallback. Si el mensaje continúa y el `client_id` no es una URL CIMD sino un ID antiguo, ChatGPT probablemente está reutilizando un cliente DCR que ya no existe en `.private/oauth-state.json`. En ese caso eliminá la app/conector anterior de ChatGPT y crealo de nuevo para forzar una identidad nueva.
+
+Podés ver el estado local con:
+
+```bash
+./mcpctl.sh oauth-status
+./mcpctl.sh logs
+```
+
 ### OAuth no abre o vuelve a pedir autorización
 
 ```bash
@@ -430,7 +453,7 @@ npm test
 npm run selftest
 ```
 
-Las pruebas incluyen sintaxis, panel de inicio y caché de actualización, los cinco perfiles de acceso, modos usuario/root, confirmaciones activas o desactivadas, filtrado y rechazo directo de herramientas, las 72 herramientas, seguridad de rutas y archivos comprimidos, descargas/HTTP, operaciones administrativas en `dryRun`, modos de autenticación, flujo OAuth completo, alertas de riesgo, PKCE, audiencia del recurso, rotación y detección de reutilización de refresh tokens, migración desde versiones anteriores, configuración inicial con ngrok simulado, unidad systemd, supervisor, propiedad de archivos privados y logs legibles.
+Las pruebas incluyen sintaxis, panel de inicio y caché de actualización, los cinco perfiles de acceso, modos usuario/root, confirmaciones activas o desactivadas, filtrado y rechazo directo de herramientas, las 72 herramientas, seguridad de rutas y archivos comprimidos, descargas/HTTP, operaciones administrativas en `dryRun`, modos de autenticación, flujo OAuth completo, CIMD de ChatGPT, DCR, alertas de riesgo, PKCE, audiencia del recurso, rotación y detección de reutilización de refresh tokens, migración desde versiones anteriores, configuración inicial con ngrok simulado, unidad systemd, supervisor, propiedad de archivos privados y logs legibles.
 
 ## Licencia
 
