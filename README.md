@@ -1,439 +1,334 @@
 # MCP Local Full Control
 
-Servidor MCP open source para conectar ChatGPT, Codex, Claude u otros clientes compatibles con una PC propia. Permite que el modelo, según los permisos configurados, pueda inspeccionar archivos, ejecutar comandos, revisar Git, procesos y logs, supervisar sesiones `tmux`, ver capturas de pantalla, consultar hardware, cámaras y audio, y realizar otras tareas locales.
+Servidor MCP para administrar un equipo propio desde ChatGPT y otros clientes compatibles. Expone herramientas de archivos, comandos, procesos, servicios, Git, tmux, escritorio, captura de pantalla, cámara, audio y diagnóstico del sistema.
 
-La idea es convertir al asistente en un auditor/orquestador del equipo, mientras herramientas como Codex CLI pueden quedar trabajando directamente dentro de los repositorios.
+La versión 4 agrega:
 
-```text
-ChatGPT / Chief
-  ├─ archivos, logs, procesos y sistema
-  ├─ Git, tests y métricas
-  ├─ capturas de pantalla
-  └─ tmux
-      ├─ Codex CLI / proyecto A
-      └─ Codex CLI / proyecto B
-```
+- configuración inicial completa en **una sola terminal**;
+- guardado automático del endpoint de ngrok;
+- OAuth 2.1 integrado para ChatGPT;
+- modo temporal o servicio persistente;
+- registros explicados en lenguaje legible;
+- separación estricta entre configuración pública del repositorio y secretos locales.
 
-> **Seguridad:** el primer arranque usa acceso restringido por defecto. `MCP_FULL_ACCESS=1` debe elegirse explícitamente y otorga al MCP acceso a cualquier ruta/acción que ya permita el usuario del sistema. No convierte al proceso en root ni evita `sudo`, ACLs o permisos del sistema operativo.
+> **Advertencia de seguridad:** este servidor puede leer, escribir, ejecutar comandos y controlar el escritorio con los permisos del usuario que lo inicia. Instalalo solamente en equipos propios, restringí las carpetas permitidas y preferí OAuth para cualquier endpoint permanente.
 
-## Inicio rápido en Linux
+## Plataformas
 
-Clonar el repositorio y ejecutar:
+La experiencia completa está preparada para Linux con Bash y systemd, especialmente Debian y Ubuntu.
+
+- **Linux con systemd:** asistente inicial, modo temporal y servicio persistente.
+- **Linux sin systemd/macOS:** asistente y modo temporal; el servicio persistente debe adaptarse al gestor de servicios del sistema.
+- **Windows:** para la experiencia completa se recomienda WSL. El launcher `start-mcp.cmd` se mantiene para compatibilidad básica.
+
+Requisitos mínimos: Node.js 18 o superior, npm, Git, curl y Python 3. El launcher intenta instalar dependencias faltantes en distribuciones compatibles.
+
+## Instalación rápida
 
 ```bash
 git clone https://github.com/vicktorgabriel/mcp-server.git
 cd mcp-server
-chmod +x start-mcp.sh
-./start-mcp.sh
+bash start-mcp.sh
 ```
 
-El launcher:
+En el primer inicio aparece un asistente. No hace falta abrir otra terminal ni editar `.env` a mano.
 
-1. muestra un menú para elegir inicio **temporal** o **persistente**;
-2. comprueba Node.js, npm, Git, curl y Python;
-3. intenta instalar automáticamente lo que falte usando `apt`, `dnf`, `pacman`, `zypper`, `apk` o Homebrew;
-4. intenta completar herramientas opcionales de escritorio, `tmux`, ffmpeg, V4L2, etc.;
-5. crea `.env` en el primer arranque;
-6. pregunta si querés acceso restringido o full-control;
-7. pregunta cómo vas a publicar el MCP: ngrok, URL HTTPS propia o sólo local;
-8. inicia MCP y ngrok según el modo elegido y muestra la URL exacta para ChatGPT.
+El asistente pregunta:
 
-El modo predeterminado es **temporal**: mantiene el log visible y detiene MCP/ngrok al cerrar la terminal o pulsar `Ctrl+C`. Algunas instalaciones de paquetes pueden pedir la contraseña de administrador mediante `sudo`/Polkit.
+1. qué carpetas puede administrar el MCP;
+2. si se publicará mediante ngrok, una URL/IP propia o solamente en local;
+3. el authtoken y el endpoint de ngrok, cuando corresponda;
+4. si usará OAuth, token Bearer o ninguna autenticación;
+5. si se iniciará en modo temporal o persistente.
 
-## Modos de inicio
+La configuración se conserva para los próximos inicios.
 
-### Temporal — recomendado para uso ocasional
+## Dónde se guardan la configuración y los secretos
+
+| Archivo/directorio | Contenido | Git |
+|---|---|---|
+| `.env` | URL, puerto, rutas y modo seleccionado | Ignorado |
+| `.private/ngrok.yml` | Authtoken de ngrok | Ignorado, modo `0600` |
+| `.private/oauth-state.json` | Hash de contraseña, clientes y hashes de tokens OAuth | Ignorado, modo `0600` |
+| `.private/bearer-token.txt` | Token Bearer, sólo si se eligió ese modo | Ignorado, modo `0600` |
+| `.runtime/` | estado, actividad y diagnóstico local | Ignorado |
+
+No copies secretos dentro del README, scripts, commits, capturas públicas ni mensajes de soporte.
+
+## Publicación del MCP
+
+### Opción 1: ngrok — recomendada
+
+ngrok proporciona HTTPS, funciona detrás de CGNAT, evita abrir puertos en el router y permite usar una URL estable si la cuenta tiene un endpoint reservado.
+
+Durante el primer inicio:
+
+- el asistente solicita el **authtoken** con entrada oculta;
+- solicita la URL asignada o reservada, por ejemplo `https://mi-equipo.ngrok.dev`;
+- también permite presionar Enter para detectar el endpoint predeterminado de la cuenta;
+- comprueba realmente el túnel;
+- guarda el endpoint en `.env` para reutilizarlo;
+- guarda el authtoken únicamente en `.private/ngrok.yml`.
+
+No escribas `/mcp` dentro de `NGROK_URL`. El launcher lo agrega al mostrar la dirección final.
+
+### Opción 2: IP pública o URL propia
+
+El asistente detecta la IP externa, cambia el servidor para escuchar en `0.0.0.0` y muestra una dirección directa. También puede intentar abrir el puerto en UFW o firewalld después de pedir confirmación.
+
+Esta modalidad requiere administrar correctamente:
+
+- firewall del VPS o router;
+- redirección de puertos cuando corresponda;
+- DNS;
+- certificado TLS válido;
+- cambios de IP;
+- reverse proxy, si se desea HTTPS.
+
+Una dirección HTTP con IP puede servir para pruebas con clientes compatibles, pero **OAuth y ChatGPT requieren una URL HTTPS válida**. Además, un token Bearer sobre HTTP viajaría sin cifrado: el asistente exige una confirmación explícita y sólo lo considera apto para modo temporal. Por eso ngrok es la opción recomendada para una instalación sencilla.
+
+### Opción 3: sólo local
+
+Escucha únicamente en `127.0.0.1`. Sirve para clientes instalados en la misma computadora mediante HTTP o `stdio`, pero ChatGPT Web no puede conectarse directamente a un servidor local.
+
+## Autenticación
+
+### OAuth 2.1 — recomendada
+
+El servidor incluye un proveedor OAuth para la cuenta administradora local. Implementa:
+
+- autorización por código;
+- PKCE con `S256`;
+- Protected Resource Metadata;
+- Authorization Server Metadata;
+- registro dinámico de clientes;
+- tokens de acceso de corta duración;
+- refresh tokens rotativos y detección de reutilización, con revocación de toda la familia de sesión;
+- validación estricta del recurso `/mcp`;
+- revocación de sesiones;
+- límites de intentos;
+- hashes scrypt para la contraseña;
+- almacenamiento de códigos y tokens únicamente como hashes.
+
+En el asistente elegí OAuth, definí un usuario y una contraseña distinta de la contraseña del sistema. Cuando ChatGPT escanee las herramientas, se abrirá la página de autorización del propio MCP. Revisá el nombre y el destino antes de autorizar.
+
+El proveedor integrado está orientado a una instalación privada y de un solo administrador. Para publicar un servicio multiusuario, empresarial o de terceros, conviene usar un proveedor de identidad establecido y auditar su configuración por separado. El modo integrado anuncia DCR para que ChatGPT pueda registrar la conexión; no anuncia CIMD ni `private_key_jwt`.
+
+Comandos de administración:
 
 ```bash
-./start-mcp.sh
-# Elegir 1
+./mcpctl.sh oauth-status
+./mcpctl.sh oauth-reset
+./mcpctl.sh oauth-reset-all
 ```
 
-También puede iniciarse directamente:
+`oauth-reset` revoca las sesiones. `oauth-reset-all` también elimina los clientes registrados, por lo que ChatGPT deberá registrarse y autorizarse nuevamente.
+
+### Token Bearer
+
+Se ofrece como alternativa de compatibilidad. El asistente genera un token aleatorio si se deja el campo vacío y lo guarda únicamente en `.private/bearer-token.txt`; no lo copia dentro de `.env`.
+
+No es tan cómodo como OAuth para una app de ChatGPT y obliga a proteger y actualizar manualmente el token en cada cliente. Nunca lo uses sobre una URL pública HTTP sin cifrado.
+
+### Sin autenticación
+
+Sólo debe utilizarse durante pruebas controladas. El asistente exige escribir una confirmación explícita porque cualquiera que conozca la URL podría ejecutar las herramientas habilitadas.
+
+No dejes un MCP con acceso de escritura o control total publicado permanentemente sin autenticación.
+
+## Inicio temporal y persistente
+
+Al ejecutar:
 
 ```bash
-./start-mcp.sh --temporary
+bash start-mcp.sh
 ```
 
-El log queda visible en la terminal. Al pulsar `Ctrl+C` o cerrar esa terminal se detienen el servidor MCP y el túnel ngrok. Al elegir este modo, el launcher también detiene y deshabilita cualquier servicio persistente anterior para evitar que vuelva a iniciarse con el equipo.
+aparece este criterio de selección:
 
-### Persistente — para disponibilidad continua
+- **Temporal:** el log queda visible; `Ctrl+C` o cerrar la terminal detiene MCP y ngrok. Es la opción apropiada para uso ocasional.
+- **Persistente:** instala `mcp-local.service`, continúa después de cerrar la terminal y se inicia con el equipo. El instalador rechaza por defecto un endpoint público sin autenticación o sobre HTTP; se recomienda OAuth con HTTPS.
+
+Accesos directos:
 
 ```bash
-./start-mcp.sh
-# Elegir 2
+bash start-mcp.sh --temporary
+bash start-mcp.sh --persistent
 ```
 
-O directamente:
+El modo persistente mantiene activo el endpoint de ngrok. Revisá los límites y costos de tu cuenta de ngrok si sólo necesitás el MCP durante períodos puntuales. Los modos públicos sin autenticación o sin HTTPS quedan limitados al uso temporal, salvo una anulación experta deliberada mediante `MCP_ALLOW_UNSAFE_PERSISTENT=1`.
+
+## Registros legibles
+
+El registro principal describe **qué se está haciendo**, quién lo solicitó, si funcionó y cuánto demoró. No muestra el contenido de contraseñas, tokens ni texto escrito mediante el teclado.
 
 ```bash
-./start-mcp.sh --persistent
-```
-
-Este modo instala o actualiza `mcp-local.service`, lo habilita al arranque y mantiene MCP/ngrok activos aunque cierres la terminal. Después de instalarlo, el launcher sigue el log; `Ctrl+C` cierra sólo esa vista y no detiene el servicio.
-
-Comandos de control:
-
-```bash
-./mcpctl.sh status
-./mcpctl.sh url
-./mcpctl.sh logs
-./mcpctl.sh restart
-./mcpctl.sh stop
-./mcpctl.sh disable
-```
-
-`disable` detiene el servicio y evita que vuelva a iniciarse automáticamente. `--foreground` se conserva como alias compatible de `--temporary`.
-
-## ¿Necesito ngrok?
-
-**No siempre.** Hay tres escenarios.
-
-### 1. ngrok — recomendado para la mayoría
-
-Elegí `NGROK` si:
-
-- tenés Starlink o CGNAT;
-- tu IP pública cambia;
-- no podés/querés abrir puertos del router;
-- no tenés dominio + certificado HTTPS;
-- querés la forma más sencilla de conectar ChatGPT Web.
-
-El launcher puede descargar ngrok v3 automáticamente en `~/.local/bin`. La primera vez todavía tenés que asociarlo a tu cuenta:
-
-```bash
-ngrok config add-authtoken TU_TOKEN
-```
-
-Luego:
-
-```bash
-./start-mcp.sh
-```
-
-El launcher levanta ngrok en modo temporal o persistente, según la opción elegida, y mostrará algo similar a:
-
-```text
-URL PARA CHATGPT:
-  https://xxxx.ngrok-free.app/mcp
-```
-
-El supervisor reinicia ngrok si se cae mientras la sesión elegida siga activa. En modo temporal, cerrar la terminal termina el túnel; en modo persistente, `systemd` mantiene el conjunto activo y lo inicia con el equipo. El upstream local del MCP es siempre el puerto configurado en `PORT` —por defecto `3000`—; `NGROK_URL` sólo fija la dirección pública. Si usás una URL gratuita aleatoria, puede cambiar al crear un túnel nuevo; consultala con `./mcpctl.sh url` y actualizá el conector en ChatGPT cuando corresponda.
-
-Si `ngrok http 3000 --url https://tu-dominio.ngrok.dev` funciona manualmente pero el launcher devuelve un error de otra cuenta o plan, hay dos binarios o configuraciones de ngrok usando tokens distintos. Cerrá primero el proceso manual y ejecutá:
-
-```bash
-./configure-ngrok.sh
-```
-
-Aceptá la URL local ya guardada o escribí la correspondiente a ese equipo. El reparador prueba de forma temporal los ejecutables y configuraciones habituales —incluida la instalación Snap—, guarda en `.env` la combinación que realmente funciona y luego ofrece iniciar el MCP en modo temporal. Ni la URL real ni el token se guardan en archivos versionados del repositorio.
-
-### 2. IP pública/fija o DDNS — sin ngrok
-
-Podés prescindir de ngrok si ya tenés una **URL HTTPS pública** que llegue a la máquina.
-
-Una IP fija por sí sola no alcanza. Normalmente necesitás:
-
-```text
-Internet
-  -> https://mcp.midominio.com
-  -> DNS a tu IP pública/fija
-  -> certificado TLS válido
-  -> Caddy / Nginx / Traefik u otro reverse proxy
-  -> http://127.0.0.1:3000
-```
-
-También puede usarse una IP dinámica con DDNS, siempre que resuelvas el acceso público y HTTPS correctamente.
-
-En el primer arranque elegí:
-
-```text
-2) URL HTTPS PROPIA
-```
-
-y escribí, por ejemplo:
-
-```text
-https://mcp.midominio.com
-```
-
-El launcher mostrará para ChatGPT:
-
-```text
-https://mcp.midominio.com/mcp
-```
-
-### 3. Sólo local
-
-Para Claude Desktop, Codex u otros clientes MCP instalados en la misma computadora podés usar `stdio` y no publicar nada en Internet.
-
-Ejemplo:
-
-```text
-node /ruta/mcp-server/mcp-server.js --stdio
-```
-
-ChatGPT Web remoto no puede acceder directamente a `127.0.0.1`; para ese caso necesitás una URL alcanzable desde Internet, ya sea mediante un túnel o infraestructura propia.
-
-## Configurar ChatGPT
-
-> **Disponibilidad de ChatGPT:** según la documentación oficial actual de OpenAI, la compatibilidad MCP completa con acciones de escritura/modificación se está desplegando en beta para Business, Enterprise y Edu. Los usuarios Pro pueden conectar servidores MCP personalizados en Developer Mode con permisos de lectura/obtención. La disponibilidad, los permisos y los nombres de menús pueden cambiar con el producto.
-
-Con el MCP y el túnel/URL pública levantados:
-
-1. Abrí **Configuración** de ChatGPT.
-2. Buscá **Apps / Connectors / Conectores** y las opciones avanzadas o **Developer Mode / Modo desarrollador**. El nombre exacto puede variar según la versión de la interfaz.
-3. Agregá un servidor MCP personalizado.
-4. Elegí un nombre, por ejemplo `MCP Mi PC`.
-5. Pegá la URL que imprimió el launcher, terminada en `/mcp`:
-
-```text
-https://xxxx.ngrok-free.app/mcp
-```
-
-6. Seleccioná la autenticación correspondiente. Si dejaste `MCP_AUTH_TOKEN` vacío, configurá el conector sin autenticación si la interfaz lo permite.
-7. Guardá y habilitá el MCP en el chat.
-8. Una primera prueba útil es pedir:
-
-```text
-Usá MCP Mi PC y ejecutá control_capabilities.
-```
-
-Después podés pedir, por ejemplo:
-
-```text
-Mostrame el estado del sistema.
-Revisá este repositorio y el git diff.
-Listá las sesiones tmux.
-Hacé una captura de pantalla.
-Auditá lo que está haciendo Codex en la sesión tmux "proyecto".
-```
-
-## Configuración `.env`
-
-El launcher crea `.env` automáticamente. También podés editarlo a mano:
-
-```bash
-PORT=3000
-HOST=127.0.0.1
-ALLOWED_PATHS=/home/usuario/Proyectos
-WORKING_DIR=/home/usuario/Proyectos
-
-# 0 recomendado; 1 acceso completo permitido por el usuario
-MCP_FULL_ACCESS=0
-
-# ngrok | direct | local
-MCP_EXPOSURE_MODE=ngrok
-
-# Opcional: endpoint reservado de ngrok. Debe ser la URL pública, no el puerto local.
-NGROK_URL=https://mi-endpoint.ngrok-free.dev
-
-# Sólo para direct. No agregar /mcp al final.
-PUBLIC_BASE_URL=https://mcp.midominio.com
-
-MCP_DESKTOP_ENABLED=1
-MCP_INPUT_ENABLED=1
-MCP_AUTH_TOKEN=
-```
-
-Para volver a ejecutar el asistente inicial, podés guardar/borrar `.env` y lanzar otra vez `./start-mcp.sh`.
-
-## Acceso restringido vs full-control
-
-### Restringido — recomendado
-
-```bash
-MCP_FULL_ACCESS=0
-ALLOWED_PATHS=/home/usuario/Proyectos,/otro/directorio
-```
-
-Las rutas quedan limitadas a `ALLOWED_PATHS`.
-
-### Full-control
-
-```bash
-MCP_FULL_ACCESS=1
-```
-
-El servidor acepta rutas de todo el filesystem que pueda leer/escribir el usuario que lo ejecuta. Herramientas como `run_command`, señales de proceso, servicios, Git y control de escritorio siguen limitadas por los permisos reales del sistema operativo.
-
-No publiques un MCP full-control sin entender qué estás exponiendo. Cerrá el túnel cuando no lo necesites y considerá autenticación/red privada para instalaciones permanentes.
-
-## Herramientas disponibles
-
-Actualmente expone 51 herramientas.
-
-### Archivos
-
-`search`, `fetch`, `list_files`, `read_file`, `write_file`, `patch_file`, `file_info`, `read_image`, `tail_file`, `run_command`.
-
-`read_image` devuelve PNG/JPEG/WebP/GIF como contenido visual MCP, por lo que el modelo puede ver la imagen y no solamente su ruta.
-
-### Sistema
-
-`control_capabilities`, `mcp_runtime_status`, `mcp_runtime_logs`, `system_snapshot`, `hardware_info`, `disk_usage`, `network_status`, `gpu_status`, `process_list`, `process_info`, `process_signal`, `process_start`, `service_status`, `service_action`, `journal_tail`.
-
-`mcp_runtime_status` comprueba en una sola llamada el servicio, el health local, los sockets, el supervisor y el túnel HTTPS. `mcp_runtime_logs` devuelve journal y logs recientes con redacción básica de tokens y contraseñas.
-
-### Git
-
-`git_status`, `git_diff`, `git_log`, `git_branches`, `git_worktrees`, `git_command`.
-
-### tmux / Codex workers
-
-`tmux_list`, `tmux_panes`, `tmux_create`, `tmux_capture`, `tmux_send`, `tmux_interrupt`, `tmux_kill`.
-
-Esto permite un flujo como:
-
-```text
-ChatGPT -> tmux_capture -> lee a Codex
-ChatGPT -> git_diff/tests/logs -> audita
-ChatGPT -> tmux_send -> corrige/orienta al worker
-Codex CLI -> sigue trabajando directamente en el repo
-```
-
-### Escritorio y visión
-
-`desktop_info`, `screen_capture`, `list_windows`, `window_action`, `mouse_move`, `mouse_click`, `mouse_scroll`, `keyboard_hotkey`, `keyboard_type`, `desktop_open`.
-
-En X11 hay control global mediante XTEST/python-xlib. En KDE Plasma Wayland la captura prioriza Spectacle; Wayland puede restringir mouse/teclado global y algunas acciones de ventanas.
-
-### Cámara y audio
-
-`camera_list`, `camera_snapshot`, `audio_devices`.
-
-## Dependencias
-
-El launcher intenta instalarlas automáticamente cuando puede.
-
-Base:
-
-- Node.js 18+
-- npm
-- Git
-- curl
-- Python 3
-
-Extras útiles en Linux:
-
-- `tmux`
-- `wmctrl`
-- `scrot`, `gnome-screenshot`, `grim` o KDE Spectacle
-- `python3-xlib`
-- `xdotool`
-- `ffmpeg`
-- `v4l-utils`
-- PulseAudio/PipeWire o ALSA para audio
-
-Instalación manual de dependencias:
-
-```bash
-./install-deps.sh
-```
-
-Instalación manual de ngrok:
-
-```bash
-./install-ngrok.sh
-```
-
-## Seguridad y autenticación
-
-`GET /health` se mantiene disponible para comprobar si el servidor está vivo.
-
-Si configurás `MCP_AUTH_TOKEN`, los demás endpoints esperan:
-
-```text
-Authorization: Bearer <token>
-```
-
-La aplicación no devuelve el token desde `/config` ni lo imprime en claro en el arranque.
-
-Generar un token:
-
-```bash
-openssl rand -hex 24
-```
-
-Cada llamada MCP se registra como actividad. Las acciones destructivas conservan metadata MCP de riesgo aunque `MCP_FULL_ACCESS=1` esté activo.
-
-## Endpoints
-
-```text
-GET  /health
-GET  /config
-GET  /tools
-POST /mcp
-GET  /mcp
-GET  /sse
-POST /messages
-```
-
-Para ChatGPT moderno usá principalmente:
-
-```text
-https://TU_URL_PUBLICA/mcp
-```
-
-## Actualizar
-
-```bash
-git pull
-./start-mcp.sh
-```
-
-Después de actualizar, `./start-mcp.sh` vuelve a mostrar el menú. Elegí temporal para mantenerlo sólo durante esa terminal o persistente para instalar/actualizar el servicio.
-
-O para probar antes:
-
-```bash
-git pull
-npm test
-./self-test.sh
-```
-
-
-## Diagnóstico de errores 502
-
-Un `502 Upstream or external service errors` suele significar que la URL pública existe, pero ngrok no puede llegar al servidor local, el proceso murió o el conector conserva una URL anterior. Si el comando manual funciona pero el launcher muestra otra cuenta de ngrok, ejecutá primero `./configure-ngrok.sh URL_PUBLICA`: eso corrige la ruta del token sin mostrarlo. En ngrok v3 actual, una URL reservada se pasa con `--url`; el launcher conserva compatibilidad con configuraciones anteriores que usaban `NGROK_DOMAIN`. Ejecutá:
-
-```bash
-./mcpctl.sh status
-./mcpctl.sh url
 ./mcpctl.sh logs
 ```
 
-Desde el propio MCP también están disponibles:
+Ejemplo conceptual:
 
 ```text
-mcp_runtime_status
-mcp_runtime_logs
+02/09/2026 18:42:10   ACCION       Revisando el estado Git del proyecto. Solicitud de usuario OAuth admin mediante ChatGPT.
+02/09/2026 18:42:10   RESULTADO    Operación Git finalizada correctamente. Duración: 84 ms.
 ```
 
-El estado sano debe mostrar una ejecución temporal o persistente activa, `/health` con HTTP 200 y una URL HTTPS terminada en `/mcp`.
+Seguir la actividad en tiempo real:
+
+```bash
+./mcpctl.sh logs-follow
+```
+
+`Ctrl+C` cierra solamente la vista; no detiene el servicio persistente.
+
+Para diagnóstico técnico:
+
+```bash
+./mcpctl.sh logs-raw
+```
+
+Los registros se rotan automáticamente al alcanzar el límite configurado por `MCP_RUNTIME_LOG_MAX_BYTES` —10 MiB de forma predeterminada— y conservan una copia anterior con sufijo `.1`. Los registros técnicos también aplican redacción básica de secretos, pero pueden contener más información del sistema. No los publiques sin revisarlos.
+
+## Cómo agregarlo a ChatGPT
+
+Primero iniciá el MCP y obtené la guía con la URL exacta:
+
+```bash
+./mcpctl.sh chatgpt
+```
+
+La ruta oficial actual en ChatGPT Web es:
+
+1. Abrí **Configuración → Apps → Configuración avanzada / Advanced settings**.
+2. Activá **Modo desarrollador / Developer mode**.
+3. Volvé a **Configuración → Apps** y pulsá **Crear / Create**.
+4. Escribí un nombre que identifique al equipo, por ejemplo `MCP Taller`.
+5. Pegá la URL que muestra `./mcpctl.sh url`, siempre terminada en `/mcp`.
+6. Elegí el método configurado:
+   - **OAuth:** completá la pantalla de autorización del MCP.
+   - **Bearer:** ingresá el token privado si la interfaz ofrece ese método.
+   - **Sin autenticación:** elegí `No authentication`.
+7. Pulsá **Escanear herramientas / Scan tools**, esperá que termine y revisá las acciones detectadas.
+8. Pulsá **Crear / Create**.
+9. En un chat nuevo, seleccioná la app desde el menú de herramientas, `+` → **Más** o mediante una mención con `@`, según la interfaz disponible.
+
+En interfaces anteriores, el recorrido equivalente puede aparecer como **Configuración → Complementos → Configuración avanzada → Modo desarrollador**, seguido de **Complementos → Explorar complementos → Agregar**.
+
+Actualmente, el MCP completo con acciones de escritura/modificación está disponible para Business y Enterprise/Edu según la política del workspace. En Pro, los MCP personalizados continúan limitados a lectura/obtención. La creación se realiza en ChatGPT Web y requiere modo desarrollador. Consultá la documentación oficial: `https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt`.
+
+Sólo agregues servidores que controles y revisá las herramientas antes de habilitarlas para otros usuarios.
+
+## Comandos principales
+
+```bash
+./mcpctl.sh status          # Estado resumido
+./mcpctl.sh url             # URL exacta para ChatGPT
+./mcpctl.sh chatgpt         # Guía de conexión
+./mcpctl.sh configure       # Reconfigurar acceso, ngrok y autenticación
+./mcpctl.sh temporary       # Iniciar en primer plano
+./mcpctl.sh persistent      # Instalar/iniciar servicio persistente
+./mcpctl.sh start           # Iniciar servicio instalado
+./mcpctl.sh stop            # Detenerlo ahora
+./mcpctl.sh restart         # Reiniciarlo
+./mcpctl.sh disable         # Detener y quitar inicio automático
+./mcpctl.sh logs            # Actividad legible
+./mcpctl.sh logs-follow     # Actividad en vivo
+./mcpctl.sh logs-raw        # Diagnóstico técnico
+./mcpctl.sh doctor          # Comprobación completa
+```
+
+## Actualización
+
+```bash
+git pull
+bash start-mcp.sh
+```
+
+Las instalaciones anteriores se migran sin borrar su `.env`. Si una instalación antigua estaba publicada sin autenticación, se conserva para evitar cortar el acceso, pero se muestra una advertencia. Para activar OAuth:
+
+```bash
+./mcpctl.sh configure
+```
+
+Si cambian definiciones de herramientas después de crear la app en ChatGPT, puede ser necesario volver a escanear o actualizar las acciones desde la configuración de Apps.
+
+## Herramientas incluidas
+
+El servidor expone 51 herramientas agrupadas en:
+
+- búsqueda, lectura, escritura y parcheo de archivos;
+- ejecución de comandos;
+- procesos, servicios, journal y diagnóstico de hardware/red/GPU;
+- Git y worktrees;
+- sesiones tmux;
+- ventanas, teclado, mouse y capturas de pantalla;
+- cámara y audio;
+- diagnóstico del propio MCP y actividad legible.
+
+Todas se ejecutan con los permisos del usuario del proceso MCP. Ejecutar el servicio como `root` amplía drásticamente el impacto de una credencial comprometida; utilizá un usuario dedicado siempre que sea posible.
+
+## Resolución de problemas
+
+### ngrok funciona manualmente pero el launcher falla
+
+Cerrá cualquier proceso ngrok manual y ejecutá:
+
+```bash
+./mcpctl.sh configure
+```
+
+El asistente guarda el ejecutable, el authtoken privado y el endpoint correcto para que no haya configuraciones de cuentas distintas.
+
+### Error 502 de ngrok
+
+```bash
+./mcpctl.sh status
+./mcpctl.sh logs
+./mcpctl.sh logs-raw
+```
+
+Un 502 suele indicar que el túnel existe pero no puede llegar al servidor local. El estado correcto muestra health local operativo y ngrok apuntando a `http://127.0.0.1:3000` o al puerto elegido.
+
+### OAuth no abre o vuelve a pedir autorización
+
+```bash
+./mcpctl.sh oauth-status
+./mcpctl.sh logs
+```
+
+Comprobá que:
+
+- la URL pública no cambió;
+- usa HTTPS;
+- ChatGPT está configurado con OAuth;
+- el servicio y ngrok están activos;
+- no se revocaron las sesiones.
+
+Para comenzar de nuevo:
+
+```bash
+./mcpctl.sh oauth-reset-all
+```
+
+Luego eliminá/recreá o reconectá la app en ChatGPT.
+
+### Reconfigurar mientras está en modo temporal
+
+Volvé a la terminal donde está corriendo, presioná `Ctrl+C` y después ejecutá:
+
+```bash
+./mcpctl.sh configure
+```
 
 ## Pruebas
 
-Chequeo estático:
-
 ```bash
 npm test
+npm run selftest
 ```
 
-Chequeo funcional:
-
-```bash
-./self-test.sh
-```
-
-`self-test.sh` crea y elimina una sesión tmux temporal y puede tomar una captura de pantalla. No hace clicks ni escribe texto en otras aplicaciones.
-
-## Windows
-
-El núcleo MCP (archivos, comandos, Git, procesos compatibles) funciona con Node.js. `start-mcp.cmd` sigue disponible como launcher para Windows, pero las herramientas de escritorio X11 son específicas de Linux. En Windows el nivel exacto de herramientas disponibles se puede consultar con `control_capabilities`.
-
-Para una instalación orientada a control de escritorio completo, Linux/X11 es actualmente el entorno con mayor cobertura de este proyecto.
+Las pruebas incluyen sintaxis, modos de autenticación, flujo OAuth completo, PKCE, audiencia del recurso, rotación y detección de reutilización de refresh tokens, revocación, almacenamiento sin secretos en texto claro, asistente inicial con ngrok simulado, migración de instalaciones anteriores, bloqueo de configuraciones HTTP inseguras, unidad systemd, supervisor, logs legibles y herramientas básicas.
 
 ## Licencia
 
-MIT. Usalo bajo tu propia responsabilidad, especialmente cuando habilites acceso completo o publiques el servidor en Internet.
+MIT.

@@ -16,6 +16,8 @@ const path = require('path');
 const readline = require('readline');
 const { URL } = require('url');
 const { createFullControl } = require('./full-control-tools');
+const { describeToolStart, describeToolSuccess, friendlyError, humanEvent, redactText } = require('./human-log');
+const { OAuthProvider, normalizeBaseUrl } = require('./oauth-provider');
 const PACKAGE_VERSION = require('./package.json').version;
 
 loadDotEnv();
@@ -27,8 +29,15 @@ const DEFAULT_ROOT = process.env.WORKING_DIR || inferDefaultRoot();
 const ALLOWED_ROOTS = FULL_ACCESS ? [path.resolve('/')] : parseAllowedRoots(process.env.ALLOWED_PATHS || DEFAULT_ROOT);
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
-const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || '';
-const ACTIVITY_LOG = process.env.ACTIVITY_LOG || '';
+const AUTH_TOKEN_FILE = resolveRepoPath(process.env.MCP_AUTH_TOKEN_FILE || '.private/bearer-token.txt');
+const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || readSecretFile(AUTH_TOKEN_FILE);
+const AUTH_MODE = normalizeAuthMode(process.env.MCP_AUTH_MODE, AUTH_TOKEN);
+const EXPOSURE_MODE = String(process.env.MCP_EXPOSURE_MODE || 'local').trim().toLowerCase();
+const CONFIGURED_PUBLIC_BASE_URL = configuredPublicBaseUrl();
+const OAUTH_STORE_PATH = resolveRepoPath(process.env.MCP_OAUTH_STORE || '.private/oauth-state.json');
+const OAUTH_PROVIDER = AUTH_MODE === 'oauth' ? new OAuthProvider({ storePath: OAUTH_STORE_PATH }) : null;
+const ACTIVITY_LOG = resolveRepoPath(process.env.ACTIVITY_LOG || '.runtime/activity.ndjson');
+const ERROR_LOG = resolveRepoPath(process.env.MCP_ERROR_LOG || '.runtime/errors.log');
 const DEFAULT_SEARCH_SKIP_DIRS = 'node_modules,.git';
 const FAST_MODE = parseBoolean(process.env.MCP_FAST_MODE, false);
 const SEARCH_CACHE_TTL_MS = parseNumber(process.env.SEARCH_CACHE_TTL_MS, FAST_MODE ? 60_000 : 0, { min: 0 });
@@ -53,32 +62,171 @@ const KEEP_ALIVE_TIMEOUT_MS = parseNumber(process.env.KEEP_ALIVE_TIMEOUT_MS, 0, 
 const searchCache = new Map();
 
 if (!FULL_ACCESS) validateAllowedRoots(ALLOWED_ROOTS);
+validateAuthConfiguration();
 
 class Logger {
   static info(message) {
-    console.error(`[INFO] ${message}`);
+    humanEvent('SISTEMA', translateSystemMessage(message));
   }
 
   static error(message, error = null) {
-    console.error(`[ERROR] ${message}`);
-    if (error) console.error(error.stack || error);
+    const detail = error && (error.message || error)
+      ? `${message}: ${redactText(error.message || error)}`
+      : message;
+    humanEvent('ERROR', detail);
+    appendPrivateLog(ERROR_LOG, {
+      ts: new Date().toISOString(),
+      message: redactText(message),
+      error: error ? redactText(error.stack || error.message || error) : ''
+    });
   }
 
   static debug(message) {
-    if (process.env.DEBUG) console.error(`[DEBUG] ${message}`);
+    if (process.env.DEBUG) humanEvent('DEPURACION', message);
   }
 
   static activity(event) {
-    const entry = {
+    appendPrivateLog(ACTIVITY_LOG, {
       ts: new Date().toISOString(),
-      ...event
-    };
+      ...sanitizeActivity(event)
+    });
+  }
 
-    console.error(`[ACTIVITY] ${JSON.stringify(entry)}`);
-    if (ACTIVITY_LOG) {
-      fs.appendFileSync(ACTIVITY_LOG, `${JSON.stringify(entry)}\n`, 'utf8');
+  static toolStart(tool, args, context = {}) {
+    const actor = context.principal && context.principal.label
+      ? ` Solicitud de ${context.principal.label}.`
+      : '';
+    humanEvent('ACCION', `${describeToolStart(tool, args)}${actor}`);
+  }
+
+  static toolSuccess(tool, result, durationMs) {
+    humanEvent('RESULTADO', describeToolSuccess(tool, result, durationMs));
+  }
+
+  static toolFailure(tool, error, durationMs) {
+    humanEvent('ERROR', `La herramienta ${tool || 'desconocida'} no pudo completar la tarea después de ${Math.max(0, Number(durationMs || 0))} ms: ${friendlyError(error)}`);
+  }
+}
+
+function appendPrivateLog(filePath, payload) {
+  try {
+    appendPrivateLine(filePath, JSON.stringify(payload));
+  } catch (_) {
+    // A logging failure must not interrupt an MCP operation.
+  }
+}
+
+function sanitizeActivity(value, key = '') {
+  if (/token|password|passwd|secret|authorization|api[_-]?key/i.test(key)) {
+    return value ? '[OCULTO]' : value;
+  }
+  if (key === 'args' && Array.isArray(value)) {
+    return value.length ? [`${value.length} argumento(s) omitido(s) por seguridad`] : [];
+  }
+  if (Array.isArray(value)) return value.map((item) => sanitizeActivity(item));
+  if (value && typeof value === 'object') {
+    const output = {};
+    for (const [childKey, childValue] of Object.entries(value)) {
+      output[childKey] = sanitizeActivity(childValue, childKey);
+    }
+    return output;
+  }
+  return typeof value === 'string' ? redactText(value) : value;
+}
+
+function translateSystemMessage(message) {
+  const text = String(message || '');
+  const replacements = [
+    [/^MCP HTTP server listening at /, 'Servidor MCP listo en '],
+    [/^Allowed roots: /, 'Rutas permitidas: '],
+    [/^Auth: OAuth$/, 'Autenticación OAuth activa.'],
+    [/^Auth: Bearer token required$/, 'Autenticación mediante token Bearer activa.'],
+    [/^Auth: none$/, 'Servidor sin autenticación de aplicación.'],
+    [/^MCP stdio server started$/, 'Servidor MCP local iniciado mediante stdio.'],
+    [/^Protocol version: /, 'Versión del protocolo MCP: ']
+  ];
+  for (const [pattern, replacement] of replacements) {
+    if (pattern.test(text)) return text.replace(pattern, replacement);
+  }
+  return text;
+}
+function resolveRepoPath(value) {
+  const configured = String(value || '').trim();
+  if (!configured) return '';
+  return path.isAbsolute(configured) ? configured : path.resolve(__dirname, configured);
+}
+
+function readSecretFile(filePath) {
+  if (!filePath) return '';
+  try {
+    const stats = fs.statSync(filePath);
+    if (!stats.isFile()) return '';
+    return fs.readFileSync(filePath, 'utf8').trim();
+  } catch (error) {
+    if (error.code === 'ENOENT') return '';
+    throw new Error(`No se pudo leer el archivo privado ${filePath}: ${error.message}`);
+  }
+}
+
+function normalizeAuthMode(value, legacyToken = '') {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return legacyToken ? 'bearer' : 'none';
+  if (['oauth', 'bearer', 'none'].includes(normalized)) return normalized;
+  throw new Error(`MCP_AUTH_MODE no válido: ${value}. Usá oauth, bearer o none.`);
+}
+
+function configuredPublicBaseUrl() {
+  const raw = String(
+    process.env.MCP_PUBLIC_BASE_URL
+      || process.env.PUBLIC_BASE_URL
+      || process.env.NGROK_URL
+      || process.env.NGROK_DOMAIN
+      || ''
+  ).trim();
+  if (!raw) return '';
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    return normalizeBaseUrl(withScheme);
+  } catch (error) {
+    throw new Error(`La URL pública configurada no es válida: ${error.message}`);
+  }
+}
+
+function isLoopbackHostname(hostname) {
+  const normalized = String(hostname || '').toLowerCase();
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1' || normalized === '[::1]';
+}
+
+function isLoopbackAddress(address) {
+  const normalized = String(address || '').trim().toLowerCase().replace(/^::ffff:/, '');
+  return normalized === '::1' || normalized === '127.0.0.1' || normalized.startsWith('127.');
+}
+
+function validateAuthConfiguration() {
+  if (!process.argv.includes('--http')) return;
+  if (AUTH_MODE === 'none' && EXPOSURE_MODE !== 'local' && !parseBoolean(process.env.MCP_ALLOW_UNSAFE_NO_AUTH, false)) {
+    throw new Error('Publicar sin autenticación requiere una confirmación explícita: MCP_ALLOW_UNSAFE_NO_AUTH=1.');
+  }
+  if (AUTH_MODE === 'bearer') {
+    if (!AUTH_TOKEN) throw new Error('MCP_AUTH_MODE=bearer requiere un token en MCP_AUTH_TOKEN o MCP_AUTH_TOKEN_FILE.');
+    if (AUTH_TOKEN.length < 32) throw new Error('El token Bearer debe tener al menos 32 caracteres. Reconfigurá el servidor para generar uno seguro.');
+    if (EXPOSURE_MODE !== 'local' && CONFIGURED_PUBLIC_BASE_URL) {
+      const publicUrl = new URL(CONFIGURED_PUBLIC_BASE_URL);
+      if (publicUrl.protocol !== 'https:' && !parseBoolean(process.env.MCP_ALLOW_INSECURE_HTTP_AUTH, false)) {
+        throw new Error('Bearer sobre una URL HTTP pública está bloqueado porque el token viajaría sin cifrado. Usá ngrok/HTTPS o confirmá el modo temporal inseguro desde el asistente.');
+      }
     }
   }
+  if (AUTH_MODE !== 'oauth') return;
+  if (!CONFIGURED_PUBLIC_BASE_URL) {
+    throw new Error('OAuth requiere una URL pública estable en NGROK_URL o PUBLIC_BASE_URL.');
+  }
+  const publicUrl = new URL(CONFIGURED_PUBLIC_BASE_URL);
+  const localHttpAllowed = parseBoolean(process.env.MCP_OAUTH_ALLOW_HTTP_LOCALHOST, false) && isLoopbackHostname(publicUrl.hostname);
+  if (publicUrl.protocol !== 'https:' && !localHttpAllowed) {
+    throw new Error('OAuth requiere una URL pública HTTPS. Para una prueba local explícita puede usarse MCP_OAUTH_ALLOW_HTTP_LOCALHOST=1.');
+  }
+  OAUTH_PROVIDER.assertConfigured();
 }
 
 function parseAllowedRoots(value) {
@@ -618,7 +766,7 @@ class MCPFileServer {
     };
   }
 
-  async handle(request) {
+  async handle(request, context = {}) {
     if (!request || request.jsonrpc !== JSONRPC_VERSION) {
       return createError(request && request.id, -32600, 'Invalid JSON-RPC request');
     }
@@ -631,21 +779,42 @@ class MCPFileServer {
     try {
       switch (request.method) {
         case 'initialize':
+          humanEvent('CONEXION', `Cliente MCP conectado${context.principal && context.principal.label ? ` mediante ${context.principal.label}` : ''}.`);
           return createResponse(request.id, this.initialize());
         case 'tools/list':
           return createResponse(request.id, { tools: this.getTools() });
         case 'tools/call': {
           const params = request.params || {};
+          const toolArgs = params.arguments || {};
           const started = Date.now();
-          const result = await this.callTool(params.name, params.arguments || {});
-          Logger.activity({
-            method: 'tools/call',
-            tool: params.name,
-            args: summarizeToolArgs(params.name, params.arguments || {}),
-            durationMs: Date.now() - started,
-            ok: true
-          });
-          return createResponse(request.id, result);
+          Logger.toolStart(params.name, toolArgs, context);
+          try {
+            const result = await this.callTool(params.name, toolArgs);
+            const durationMs = Date.now() - started;
+            Logger.activity({
+              method: 'tools/call',
+              tool: params.name,
+              args: summarizeToolArgs(params.name, toolArgs),
+              actor: context.principal && context.principal.label || '',
+              durationMs,
+              ok: true
+            });
+            Logger.toolSuccess(params.name, result, durationMs);
+            return createResponse(request.id, result);
+          } catch (error) {
+            const durationMs = Date.now() - started;
+            Logger.activity({
+              method: 'tools/call',
+              tool: params.name,
+              args: summarizeToolArgs(params.name, toolArgs),
+              actor: context.principal && context.principal.label || '',
+              durationMs,
+              ok: false,
+              error: error.message
+            });
+            Logger.toolFailure(params.name, error, durationMs);
+            throw error;
+          }
         }
         case 'ping':
           return createResponse(request.id, {});
@@ -654,16 +823,6 @@ class MCPFileServer {
       }
     } catch (error) {
       Logger.error(`Error handling ${request.method}`, error);
-      if (request.method === 'tools/call') {
-        const params = request.params || {};
-        Logger.activity({
-          method: 'tools/call',
-          tool: params.name,
-          args: summarizeToolArgs(params.name, params.arguments || {}),
-          ok: false,
-          error: error.message
-        });
-      }
       return createError(request.id, -32603, error.message);
     }
   }
@@ -974,10 +1133,66 @@ class MCPFileServer {
   }
 }
 
-function hasValidAuth(req) {
-  if (!AUTH_TOKEN) return true;
-  const header = req.headers.authorization || '';
-  return header === `Bearer ${AUTH_TOKEN}`;
+function timingSafeHeaderEqual(left, right) {
+  const a = Buffer.from(String(left || ''), 'utf8');
+  const b = Buffer.from(String(right || ''), 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function publicBaseUrl(req) {
+  if (CONFIGURED_PUBLIC_BASE_URL) return CONFIGURED_PUBLIC_BASE_URL;
+  const trustedProxy = isLoopbackAddress(req.socket.remoteAddress);
+  const forwardedProto = trustedProxy ? String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() : '';
+  const forwardedHost = trustedProxy ? String(req.headers['x-forwarded-host'] || '').split(',')[0].trim() : '';
+  const proto = forwardedProto || (req.socket.encrypted ? 'https' : 'http');
+  const host = forwardedHost || req.headers.host || `${HOST}:${PORT}`;
+  try {
+    return normalizeBaseUrl(`${proto}://${host}`);
+  } catch (_) {
+    return `http://${HOST}:${PORT}`;
+  }
+}
+
+function authenticateHttpRequest(req, baseUrl) {
+  if (AUTH_MODE === 'none') {
+    return {
+      ok: true,
+      principal: {
+        subject: 'anonymous',
+        clientId: 'anonymous',
+        clientName: 'conexión sin autenticación',
+        label: 'una conexión sin autenticación'
+      }
+    };
+  }
+
+  if (AUTH_MODE === 'oauth') {
+    return OAUTH_PROVIDER.authenticateRequest(req, baseUrl);
+  }
+
+  const expected = `Bearer ${AUTH_TOKEN}`;
+  const header = String(req.headers.authorization || '');
+  if (!timingSafeHeaderEqual(header, expected)) return { ok: false, reason: header ? 'invalid_token' : 'missing_token' };
+  return {
+    ok: true,
+    principal: {
+      subject: 'bearer-user',
+      clientId: 'static-bearer',
+      clientName: 'cliente con token Bearer',
+      label: 'un cliente autenticado con token Bearer'
+    }
+  };
+}
+
+function securityHeaders() {
+  return {
+    'x-content-type-options': 'nosniff',
+    'x-frame-options': 'DENY',
+    'referrer-policy': 'no-referrer',
+    'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
+    'cross-origin-resource-policy': 'same-origin',
+    'strict-transport-security': 'max-age=31536000'
+  };
 }
 
 function corsHeaders() {
@@ -999,23 +1214,36 @@ function corsHeaders() {
   };
 }
 
-function sendJson(res, statusCode, payload) {
+function sendJson(res, statusCode, payload, extraHeaders = {}) {
   const body = JSON.stringify(payload);
   res.writeHead(statusCode, {
+    ...securityHeaders(),
     ...corsHeaders(),
     'content-type': 'application/json; charset=utf-8',
-    'content-length': Buffer.byteLength(body)
+    'content-length': Buffer.byteLength(body),
+    'cache-control': 'no-store',
+    ...extraHeaders
   });
   res.end(body);
 }
 
-function sendEmpty(res, statusCode = 202) {
-  res.writeHead(statusCode, corsHeaders());
+function sendEmpty(res, statusCode = 202, extraHeaders = {}) {
+  res.writeHead(statusCode, { ...securityHeaders(), ...corsHeaders(), ...extraHeaders });
   res.end();
 }
 
-function sendAuthError(res) {
-  sendJson(res, 401, { error: 'Missing or invalid bearer token' });
+function sendAuthError(req, res, baseUrl, authResult) {
+  if (AUTH_MODE === 'oauth') {
+    OAUTH_PROVIDER.sendProtectedResourceError(req, res, baseUrl, authResult && authResult.reason);
+    return;
+  }
+  humanEvent('SEGURIDAD', 'Se rechazó una solicitud con token Bearer ausente o incorrecto.');
+  sendJson(
+    res,
+    401,
+    { error: 'invalid_token', error_description: 'Falta el token Bearer o no es válido.' },
+    { 'www-authenticate': 'Bearer realm="MCP Local Full Control"' }
+  );
 }
 
 function writeSse(res, event, data) {
@@ -1030,9 +1258,14 @@ function startHttp() {
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
+      const baseUrl = publicBaseUrl(req);
 
       if (req.method === 'OPTIONS') {
         sendEmpty(res, 204);
+        return;
+      }
+
+      if (AUTH_MODE === 'oauth' && await OAUTH_PROVIDER.handle(req, res, url, baseUrl)) {
         return;
       }
 
@@ -1042,23 +1275,20 @@ function startHttp() {
           version: PACKAGE_VERSION,
           launchMode: process.env.MCP_LAUNCH_MODE || 'direct',
           transport: ['streamable-http', 'sse'],
-          allowedRoots: ALLOWED_ROOTS,
-          auth: AUTH_TOKEN ? 'bearer' : 'none',
-          fastMode: FAST_MODE,
-          fullAccess: FULL_ACCESS
+          auth: AUTH_MODE
         });
         return;
       }
 
-      // Health remains public for tunnel diagnostics. Everything else is
-      // protected whenever MCP_AUTH_TOKEN is configured.
-      if (!hasValidAuth(req)) {
-        sendAuthError(res);
+      const authResult = authenticateHttpRequest(req, baseUrl);
+      if (!authResult.ok) {
+        sendAuthError(req, res, baseUrl, authResult);
         return;
       }
+      const requestContext = { principal: authResult.principal, baseUrl };
 
       if (url.pathname === '/config' && req.method === 'GET') {
-        sendJson(res, 200, buildClientConfig(publicBaseUrl(req)));
+        sendJson(res, 200, buildClientConfig(baseUrl));
         return;
       }
 
@@ -1073,7 +1303,7 @@ function startHttp() {
         const responses = [];
 
         for (const request of requests) {
-          const response = await mcp.handle(request);
+          const response = await mcp.handle(request, requestContext);
           if (response) responses.push(response);
         }
 
@@ -1088,8 +1318,9 @@ function startHttp() {
       if ((url.pathname === '/mcp' || url.pathname === '/sse') && req.method === 'GET') {
         const sessionId = crypto.randomUUID();
         prepareSse(res);
-        sessions.set(sessionId, res);
+        sessions.set(sessionId, { stream: res, context: requestContext });
         writeSse(res, 'endpoint', `/messages?sessionId=${sessionId}`);
+        humanEvent('CONEXION', `Se abrió una sesión MCP por SSE para ${authResult.principal.label}.`);
 
         const heartbeat = setInterval(() => {
           if (res.writableEnded) {
@@ -1109,22 +1340,23 @@ function startHttp() {
 
       if (url.pathname === '/messages' && req.method === 'POST') {
         const sessionId = url.searchParams.get('sessionId');
-        const stream = sessions.get(sessionId);
-        if (!stream) {
+        const session = sessions.get(sessionId);
+        if (!session) {
           sendJson(res, 404, { error: 'Unknown SSE session' });
           return;
         }
 
-        const response = await mcp.handle(await readJsonBody(req));
-        if (response) writeSse(stream, 'message', response);
+        const response = await mcp.handle(await readJsonBody(req), session.context || requestContext);
+        if (response) writeSse(session.stream, 'message', response);
         sendEmpty(res, 202);
         return;
       }
 
       sendJson(res, 404, { error: 'Not found' });
     } catch (error) {
-      Logger.error('HTTP request failed', error);
-      sendJson(res, 500, { error: error.message });
+      Logger.error('Falló una solicitud HTTP', error);
+      if (!res.headersSent) sendJson(res, 500, { error: 'No se pudo completar la solicitud.' });
+      else if (!res.writableEnded) res.end();
     }
   });
 
@@ -1133,28 +1365,31 @@ function startHttp() {
     server.headersTimeout = KEEP_ALIVE_TIMEOUT_MS + 5_000;
   }
 
+  server.on('error', (error) => {
+    Logger.error(`El servidor HTTP no pudo escuchar en ${HOST}:${PORT}`, error);
+    process.exitCode = 1;
+  });
+
   server.listen(PORT, HOST, () => {
     Logger.info(`MCP HTTP server listening at http://${HOST}:${PORT}`);
     Logger.info(`Allowed roots: ${rootForDisplay()}`);
-    Logger.info(`Auth: ${AUTH_TOKEN ? 'Bearer token required' : 'none'}`);
-    printConfig(`http://${HOST}:${PORT}`);
+    Logger.info(`Auth: ${AUTH_MODE === 'oauth' ? 'OAuth' : AUTH_MODE === 'bearer' ? 'Bearer token required' : 'none'}`);
+    if (AUTH_MODE === 'none' && EXPOSURE_MODE !== 'local') {
+      humanEvent('SEGURIDAD', 'Advertencia: el MCP está publicado sin autenticación. Usá OAuth para una instalación permanente.');
+    }
+    printConfig(CONFIGURED_PUBLIC_BASE_URL || `http://${HOST}:${PORT}`);
   });
 }
 
 function prepareSse(res) {
   res.writeHead(200, {
+    ...securityHeaders(),
     ...corsHeaders(),
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive'
   });
   res.write('\n');
-}
-
-function publicBaseUrl(req) {
-  const proto = req.headers['x-forwarded-proto'] || 'http';
-  const host = req.headers['x-forwarded-host'] || req.headers.host;
-  return `${proto}://${host}`;
 }
 
 function readJsonBody(req) {
@@ -1187,54 +1422,61 @@ function readJsonBody(req) {
   });
 }
 
+function authDisplayName() {
+  if (AUTH_MODE === 'oauth') return 'OAuth 2.1 con PKCE';
+  if (AUTH_MODE === 'bearer') return 'Token Bearer estático';
+  return 'Sin autenticación';
+}
+
 function buildClientConfig(baseUrl) {
+  const normalizedBase = (() => {
+    try { return normalizeBaseUrl(baseUrl); } catch (_) { return String(baseUrl || '').replace(/\/+$/, ''); }
+  })();
   const stdioConfig = {
     transport: 'stdio',
-    startup: 'On demand; the MCP client launches the server only when a tool is used.',
+    startup: 'Bajo demanda: el cliente local inicia el servidor cuando necesita una herramienta.',
     command: 'node',
     args: [path.join(__dirname, 'mcp-server.js'), '--stdio'],
     env: recommendedStdioEnv(),
-    note: 'Recommended for local clients to avoid a permanently running MCP HTTP process.'
+    note: 'Recomendado para clientes instalados en la misma computadora.'
   };
 
   return {
     chatgpt: {
       name: 'MCP Local Full Control',
-      url: `${baseUrl}/mcp`,
+      url: `${normalizedBase}/mcp`,
       transport: 'Streamable HTTP',
-      auth: AUTH_TOKEN ? 'Bearer token' : 'No authentication',
-      note: 'Use HTTP only for remote/web clients. This mode keeps the server running while exposed.'
+      auth: authDisplayName(),
+      oauthDiscovery: AUTH_MODE === 'oauth' ? `${normalizedBase}/.well-known/oauth-protected-resource/mcp` : '',
+      note: AUTH_MODE === 'oauth'
+        ? 'Elegí OAuth en ChatGPT. La autorización abre una página propia de este servidor.'
+        : AUTH_MODE === 'none'
+          ? 'Elegí Sin autenticación. No se recomienda dejar este modo publicado permanentemente.'
+          : 'Usá el token Bearer configurado localmente; el valor nunca se expone por este endpoint.'
     },
     claudeWeb: {
       name: 'MCP Local Full Control',
-      url: `${baseUrl}/sse`,
+      url: `${normalizedBase}/sse`,
       transport: 'SSE',
-      auth: AUTH_TOKEN ? 'Bearer token' : 'No authentication',
-      note: 'Use SSE/HTTP only when you need a remote web connector.'
+      auth: authDisplayName()
     },
     claudeDesktop: stdioConfig,
     localRecommended: stdioConfig,
     allowedRoots: ALLOWED_ROOTS,
     tools: new MCPFileServer().getTools().map((tool) => tool.name),
     fullAccess: FULL_ACCESS,
-    bearerTokenConfigured: Boolean(AUTH_TOKEN)
+    authMode: AUTH_MODE,
+    bearerTokenConfigured: AUTH_MODE === 'bearer' && Boolean(AUTH_TOKEN),
+    oauth: AUTH_MODE === 'oauth' ? OAUTH_PROVIDER.authSummary() : null
   };
 }
 
 function printConfig(baseUrl) {
   const config = buildClientConfig(baseUrl);
-  console.error('');
-  console.error('=== MCP CLIENT CONFIG ===');
-  console.error(`ChatGPT Web URL: ${config.chatgpt.url}`);
-  console.error(`Claude Web URL:  ${config.claudeWeb.url}`);
-  console.error(`Local stdio:     node ${path.join(__dirname, 'mcp-server.js')} --stdio`);
-  console.error('Recommendation:  use stdio for local clients so MCP starts only on demand.');
-  if (AUTH_TOKEN) console.error('Bearer token:    configured (value hidden)');
-  console.error(`Allowed roots:   ${rootForDisplay()}`);
-  console.error('=========================');
-  console.error('');
+  humanEvent('CONFIGURACION', `URL para ChatGPT: ${config.chatgpt.url}`);
+  humanEvent('CONFIGURACION', `Autenticación seleccionada: ${config.chatgpt.auth}.`);
+  humanEvent('CONFIGURACION', `Rutas permitidas: ${rootForDisplay()}.`);
 }
-
 function startStdio() {
   const mcp = new MCPFileServer();
   Logger.info('MCP stdio server started');

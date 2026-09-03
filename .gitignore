@@ -25,3 +25,5 @@ __pycache__/
 *.pyc
 .mcp-process-*.log
 .runtime/
+
+.private/

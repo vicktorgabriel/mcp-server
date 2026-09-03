@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 ROOT_DIR="$(pwd -P)"
 SERVICE="${MCP_SERVICE_NAME:-mcp-local.service}"
 export PATH="$HOME/.local/bin:$PATH"
+SETUP_DONE=0
 
 line() { printf '%*s\n' 72 '' | tr ' ' '='; }
 info() { printf '[INFO] %s\n' "$*"; }
@@ -94,7 +95,10 @@ disable_persistent_service() {
 }
 
 start_temporary() {
-  ./setup-mcp.sh
+  if [ "$SETUP_DONE" != '1' ]; then
+    ./setup-mcp.sh
+    SETUP_DONE=1
+  fi
   disable_persistent_service
   stop_repo_runtime
 
@@ -112,7 +116,8 @@ start_temporary() {
 }
 
 start_persistent() {
-  ./install-service.sh
+  MCP_SETUP_ALREADY_DONE="$SETUP_DONE" ./install-service.sh
+  SETUP_DONE=1
 
   if [ -t 0 ] && [ -t 1 ] && [ "${MCP_FOLLOW_PERSISTENT_LOGS:-1}" != "0" ]; then
     echo ""
@@ -125,16 +130,16 @@ start_persistent() {
 
 show_menu() {
   line
-  echo " MCP Local Full Control"
+  echo " MCP Local Full Control - inicio seguro"
   line
   echo "Elegir forma de inicio:"
   echo ""
-  echo "  1) TEMPORAL (recomendado)"
+  echo "  1) TEMPORAL (recomendado para uso ocasional o sin autenticación)"
   echo "     Se ve el log. Al cerrar la terminal se detienen MCP y ngrok."
   echo ""
-  echo "  2) PERSISTENTE"
+  echo "  2) PERSISTENTE (recomendado si configuraste OAuth)"
   echo "     Sigue activo al cerrar la terminal y se inicia con el equipo."
-  echo "     Puede mantener el endpoint de ngrok activo aunque no lo uses."
+  echo "     Consultá la actividad cuando quieras con: ./mcpctl.sh logs"
   echo ""
   echo "  3) SALIR"
   echo ""
@@ -160,7 +165,9 @@ Uso:
   ./start-mcp.sh --persistent   Instala e inicia el servicio persistente
   ./start-mcp.sh --status       Estado del MCP, servicio y tunel
   ./start-mcp.sh --url          URL publica activa para ChatGPT
-  ./start-mcp.sh --logs         Ultimos logs
+  ./start-mcp.sh --logs         Actividad explicada en lenguaje legible
+  ./start-mcp.sh --configure    Reabre el asistente inicial
+  ./start-mcp.sh --chatgpt      Guía para agregarlo a ChatGPT
   ./start-mcp.sh --stop         Detiene el servicio persistente
   ./start-mcp.sh --disable      Detiene y deshabilita el inicio automatico
   ./start-mcp.sh --restart      Reinicia el servicio persistente
@@ -185,6 +192,12 @@ case "${1:-}" in
     ;;
   --setup-only)
     exec ./setup-mcp.sh
+    ;;
+  --configure)
+    exec ./mcpctl.sh configure
+    ;;
+  --chatgpt)
+    exec ./mcpctl.sh chatgpt
     ;;
   --status)
     exec ./mcpctl.sh status
@@ -212,7 +225,15 @@ case "${1:-}" in
       temporary|foreground|session) start_temporary ;;
       persistent|service|daemon) start_persistent ;;
       '')
-        if [ -t 0 ] && [ -t 1 ]; then show_menu; else start_temporary; fi
+        if [ -t 0 ] && [ -t 1 ]; then
+          if [ ! -f .env ]; then
+            ./setup-mcp.sh
+            SETUP_DONE=1
+          fi
+          show_menu
+        else
+          start_temporary
+        fi
         ;;
       *)
         err "MCP_START_MODE no valido: ${MCP_START_MODE}"

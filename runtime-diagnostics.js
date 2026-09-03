@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const { spawn } = require('child_process');
+const { redactText: redactSensitiveText } = require('./human-log');
 
 const ROOT = __dirname;
 const DEFAULT_SERVICE = 'mcp-local.service';
@@ -32,6 +33,12 @@ function configValue(fileEnv, key, fallback = '') {
   if (process.env[key] !== undefined && process.env[key] !== '') return process.env[key];
   if (fileEnv[key] !== undefined && fileEnv[key] !== '') return fileEnv[key];
   return fallback;
+}
+
+function resolveConfigPath(value, fallback) {
+  const configured = String(value || fallback || '');
+  if (!configured) return '';
+  return path.isAbsolute(configured) ? configured : path.resolve(ROOT, configured);
 }
 
 function clampInt(value, fallback, min, max) {
@@ -81,11 +88,7 @@ function sanitizeObject(value, key = '') {
 }
 
 function redactText(text) {
-  return String(text || '')
-    .replace(/(ngrok\s+config\s+add-authtoken\s+)\S+/gi, '$1[REDACTED]')
-    .replace(/(authorization\s*:\s*bearer\s+)\S+/gi, '$1[REDACTED]')
-    .replace(/((?:authtoken|token|password|passwd|secret|api[_-]?key)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi, '$1[REDACTED]')
-    .replace(/((?:authtoken|token|password|passwd|secret|api[_-]?key)\s+)[^\s,"'}]+/gi, '$1[REDACTED]');
+  return redactSensitiveText(text).replaceAll('[OCULTO]', '[REDACTED]');
 }
 
 function requestJson(host, port, requestPath, timeoutMs = 2500) {
@@ -199,15 +202,40 @@ function tailTextFile(filePath, lines) {
   }
 }
 
+function tailTextFiles(filePaths, lines) {
+  return filePaths
+    .map((filePath) => tailTextFile(filePath, lines))
+    .filter(Boolean)
+    .join('\n')
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .slice(-lines)
+    .join('\n');
+}
+
+function tailEventLines(filePath, lines) {
+  return tailTextFiles([`${filePath}.1`, filePath], lines)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
 async function collectRuntimeStatus() {
   const fileEnv = parseDotEnv();
   const host = configValue(fileEnv, 'HOST', '127.0.0.1');
   const localHost = normalizeLocalHost(host);
   const port = clampInt(configValue(fileEnv, 'PORT', '3000'), 3000, 1, 65535);
   const mode = String(configValue(fileEnv, 'MCP_EXPOSURE_MODE', 'ngrok')).toLowerCase();
+  const bearerTokenFile = resolveConfigPath(configValue(fileEnv, 'MCP_AUTH_TOKEN_FILE', '.private/bearer-token.txt'), '.private/bearer-token.txt');
+  const bearerConfigured = Boolean(configValue(fileEnv, 'MCP_AUTH_TOKEN', '')) || (() => {
+    try { return fs.statSync(bearerTokenFile).isFile() && fs.readFileSync(bearerTokenFile, 'utf8').trim().length >= 32; }
+    catch (_) { return false; }
+  })();
+  const authMode = String(configValue(fileEnv, 'MCP_AUTH_MODE', bearerConfigured ? 'bearer' : 'none')).toLowerCase();
+  const oauthStorePath = resolveConfigPath(configValue(fileEnv, 'MCP_OAUTH_STORE', '.private/oauth-state.json'), '.private/oauth-state.json');
   const publicBaseUrl = String(configValue(fileEnv, 'PUBLIC_BASE_URL', '')).replace(/\/+$/, '');
   const serviceName = configValue(fileEnv, 'MCP_SERVICE_NAME', process.env.MCP_SERVICE_NAME || DEFAULT_SERVICE);
-  const runtimeDir = path.resolve(configValue(fileEnv, 'MCP_RUNTIME_DIR', path.join(ROOT, '.runtime')));
+  const runtimeDir = resolveConfigPath(configValue(fileEnv, 'MCP_RUNTIME_DIR', '.runtime'), '.runtime');
   const runtimePath = path.join(runtimeDir, 'status.json');
   const runtimeRaw = readJsonFile(runtimePath);
   const runtime = sanitizeObject(runtimeRaw || {});
@@ -325,7 +353,10 @@ async function collectRuntimeStatus() {
       port,
       exposureMode: mode,
       fullAccess: String(configValue(fileEnv, 'MCP_FULL_ACCESS', '0')) === '1',
-      authConfigured: Boolean(configValue(fileEnv, 'MCP_AUTH_TOKEN', '')),
+      authMode,
+      authConfigured: authMode === 'oauth' ? fs.existsSync(oauthStorePath) : authMode === 'bearer' ? bearerConfigured : false,
+      oauthStorePresent: authMode === 'oauth' && fs.existsSync(oauthStorePath),
+      bearerTokenFilePresent: authMode === 'bearer' && bearerConfigured,
       allowedPathsConfigured: Boolean(configValue(fileEnv, 'ALLOWED_PATHS', '')),
       runtimeDir
     },
@@ -365,8 +396,31 @@ async function collectRuntimeStatus() {
 async function collectRuntimeLogs(lines = 200) {
   const amount = clampInt(lines, 200, 1, 5000);
   const fileEnv = parseDotEnv();
+  const runtimeDir = resolveConfigPath(configValue(fileEnv, 'MCP_RUNTIME_DIR', '.runtime'), '.runtime');
+  const humanLog = resolveConfigPath(configValue(fileEnv, 'MCP_HUMAN_LOG', path.join(runtimeDir, 'events.log')), path.join(runtimeDir, 'events.log'));
+  const status = await collectRuntimeStatus();
+  const events = tailEventLines(humanLog, amount);
+  return {
+    checkedAt: new Date().toISOString(),
+    summary: {
+      state: status.ok ? 'ready' : status.launch.active ? 'degraded' : 'stopped',
+      launchMode: status.launch.mode,
+      exposureMode: status.config.exposureMode,
+      authMode: status.config.authMode,
+      chatgptUrl: status.tunnel.chatgptUrl || '',
+      eventCount: events.length
+    },
+    events,
+    notes: status.notes,
+    warnings: status.warnings
+  };
+}
+
+async function collectRawRuntimeLogs(lines = 200) {
+  const amount = clampInt(lines, 200, 1, 5000);
+  const fileEnv = parseDotEnv();
   const serviceName = configValue(fileEnv, 'MCP_SERVICE_NAME', process.env.MCP_SERVICE_NAME || DEFAULT_SERVICE);
-  const runtimeDir = path.resolve(configValue(fileEnv, 'MCP_RUNTIME_DIR', path.join(ROOT, '.runtime')));
+  const runtimeDir = resolveConfigPath(configValue(fileEnv, 'MCP_RUNTIME_DIR', '.runtime'), '.runtime');
   const journal = process.platform === 'linux'
     ? await execResult('journalctl', ['-u', serviceName, '--no-pager', '-n', String(amount), '-o', 'short-iso'], {
         timeoutMs: 15000,
@@ -385,15 +439,19 @@ async function collectRuntimeLogs(lines = 200) {
     },
     files: {
       mcpServer: tailTextFile(path.join(runtimeDir, 'mcp-server.log'), amount),
-      ngrok: tailTextFile(path.join(runtimeDir, 'ngrok.log'), amount)
+      ngrok: tailTextFile(path.join(runtimeDir, 'ngrok.log'), amount),
+      errors: tailTextFiles([path.join(runtimeDir, 'errors.log.1'), path.join(runtimeDir, 'errors.log')], amount),
+      activity: tailTextFiles([path.join(runtimeDir, 'activity.ndjson.1'), path.join(runtimeDir, 'activity.ndjson')], amount)
     }
   };
 }
 
 async function cli() {
   const command = process.argv[2] || 'status';
-  if (command === 'logs') {
-    const result = await collectRuntimeLogs(process.argv[3]);
+  if (command === 'logs' || command === 'logs-raw') {
+    const result = command === 'logs-raw'
+      ? await collectRawRuntimeLogs(process.argv[3])
+      : await collectRuntimeLogs(process.argv[3]);
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }
@@ -419,6 +477,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  collectRawRuntimeLogs,
   collectRuntimeLogs,
   collectRuntimeStatus,
   parseDotEnv,

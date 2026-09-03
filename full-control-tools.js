@@ -172,7 +172,7 @@ function createFullControl({ resolvePath, buildToolMetadata, textResult }) {
     // Capability / diagnostics
     makeTool(buildToolMetadata, 'control_capabilities', 'Control Capabilities', 'Probes which full-control backends are available on this machine (desktop, tmux, git, camera, audio, system tools).', {}, [], ro),
     makeTool(buildToolMetadata, 'mcp_runtime_status', 'MCP Runtime Status', 'Diagnoses this MCP server, its persistent systemd service, local health endpoint and ngrok/public URL without exposing tokens.', {}, [], ro),
-    makeTool(buildToolMetadata, 'mcp_runtime_logs', 'MCP Runtime Logs', 'Returns redacted recent logs for the MCP service, server and ngrok tunnel.', {
+    makeTool(buildToolMetadata, 'mcp_runtime_logs', 'MCP Runtime Logs', 'Returns a redacted, human-readable explanation of recent MCP activity, including what was requested, whether it succeeded and relevant service notices.', {
       lines: { type: 'number', description: 'Default 200, max 5000.' }
     }, [], ro),
 

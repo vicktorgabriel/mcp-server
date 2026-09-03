@@ -41,13 +41,43 @@ TARGET_HOME="$(getent passwd "$TARGET_USER" 2>/dev/null | cut -d: -f6 || true)"
 [ -n "$TARGET_HOME" ] || TARGET_HOME="$HOME"
 
 if [ "$TARGET_USER" = "root" ]; then
-  warn "El servicio se instalara como root. Un MCP publico con full-control y sin token es extremadamente sensible."
+  warn "El servicio se instalará como root. Asegurate de usar OAuth y no compartir la URL pública."
 fi
 
-if [ "$(id -u)" -eq 0 ] && [ "$TARGET_USER" != "root" ] && command -v sudo >/dev/null 2>&1; then
-  sudo -u "$TARGET_USER" -H env PATH="$TARGET_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" "$ROOT_DIR/setup-mcp.sh"
-else
-  "$ROOT_DIR/setup-mcp.sh"
+if [ "${MCP_SETUP_ALREADY_DONE:-0}" != '1' ]; then
+  if [ "$(id -u)" -eq 0 ] && [ "$TARGET_USER" != "root" ] && command -v sudo >/dev/null 2>&1; then
+    sudo -u "$TARGET_USER" -H env PATH="$TARGET_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" "$ROOT_DIR/setup-mcp.sh"
+  else
+    "$ROOT_DIR/setup-mcp.sh"
+  fi
+fi
+
+AUTH_MODE="$(cd "$ROOT_DIR" && node - <<'NODE'
+const { parseDotEnv } = require('./runtime-diagnostics');
+const env = parseDotEnv();
+process.stdout.write(String(env.MCP_AUTH_MODE || (env.MCP_AUTH_TOKEN ? 'bearer' : 'none')));
+NODE
+)"
+EXPOSURE_MODE="$(cd "$ROOT_DIR" && node - <<'NODE'
+const { parseDotEnv } = require('./runtime-diagnostics');
+process.stdout.write(String(parseDotEnv().MCP_EXPOSURE_MODE || 'ngrok'));
+NODE
+)"
+PUBLIC_URL="$(cd "$ROOT_DIR" && node - <<'NODE'
+const { parseDotEnv } = require('./runtime-diagnostics');
+const env=parseDotEnv();
+process.stdout.write(String(env.MCP_PUBLIC_BASE_URL || env.NGROK_URL || env.PUBLIC_BASE_URL || ''));
+NODE
+)"
+if [ "$AUTH_MODE" = 'none' ] && [ "$EXPOSURE_MODE" != 'local' ] \
+   && [ "${MCP_ALLOW_UNSAFE_PERSISTENT:-0}" != '1' ]; then
+  err 'Se rechazó el modo persistente porque el endpoint público no tiene autenticación. Ejecutá ./mcpctl.sh configure y elegí OAuth.'
+  exit 1
+fi
+if [ "$EXPOSURE_MODE" != 'local' ] && [[ "$PUBLIC_URL" = http://* ]] \
+   && [ "${MCP_ALLOW_UNSAFE_PERSISTENT:-0}" != '1' ]; then
+  err 'Se rechazó el modo persistente sobre HTTP sin cifrado. Usá ngrok o una URL HTTPS propia.'
+  exit 1
 fi
 
 if ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
@@ -107,6 +137,10 @@ RestartSec=4
 TimeoutStopSec=20
 KillMode=control-group
 UMask=0077
+LimitCORE=0
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=mcp-local
@@ -117,6 +151,11 @@ UNIT
 
 if command -v systemd-analyze >/dev/null 2>&1; then
   systemd-analyze verify "$UNIT_TMP"
+fi
+
+if [ "${MCP_SERVICE_DRY_RUN:-0}" = '1' ]; then
+  cat "$UNIT_TMP"
+  exit 0
 fi
 
 stop_legacy_processes() {
@@ -207,6 +246,7 @@ echo "========================================================================"
 echo "Servicio: $SERVICE"
 echo "Usuario:  $TARGET_USER"
 echo "Estado:   $(systemctl is-active "$SERVICE" || true)"
+echo "Seguridad: $AUTH_MODE"
 if [ -n "$URL" ]; then
   echo "URL PARA CHATGPT:"
   echo "  $URL"
@@ -218,6 +258,8 @@ echo ""
 echo "La terminal ya puede cerrarse: MCP y ngrok seguiran funcionando."
 echo "Estado:  ./mcpctl.sh status"
 echo "URL:     ./mcpctl.sh url"
-echo "Logs:    ./mcpctl.sh logs"
+echo "Actividad: ./mcpctl.sh logs"
+echo "Seguir:   ./mcpctl.sh logs-follow"
+echo "ChatGPT:  ./mcpctl.sh chatgpt"
 echo "Reinicio: ./mcpctl.sh restart"
 echo "========================================================================"

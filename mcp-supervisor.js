@@ -6,6 +6,7 @@ const path = require('path');
 const http = require('http');
 const { spawn } = require('child_process');
 const { parseDotEnv, redactText } = require('./runtime-diagnostics');
+const { humanEvent } = require('./human-log');
 
 const ROOT = __dirname;
 const fileEnv = parseDotEnv(path.join(ROOT, '.env'));
@@ -33,6 +34,8 @@ const NGROK_LOG_PATH = path.join(RUNTIME_DIR, 'ngrok.log');
 const MAX_LOG_BYTES = positiveInt(process.env.MCP_RUNTIME_LOG_MAX_BYTES, 10 * 1024 * 1024, 1024 * 1024, 1024 * 1024 * 1024);
 const HEALTH_START_TIMEOUT_MS = positiveInt(process.env.MCP_HEALTH_START_TIMEOUT_MS, 30000, 5000, 300000);
 const NGROK_BIN = process.env.NGROK_BIN || 'ngrok';
+const AUTH_MODE = String(process.env.MCP_AUTH_MODE || (process.env.MCP_AUTH_TOKEN ? 'bearer' : 'none')).toLowerCase();
+const CONFIGURED_NGROK_URL = normalizeNgrokUrl(process.env.NGROK_URL || process.env.NGROK_DOMAIN);
 
 fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 });
 try { fs.chmodSync(RUNTIME_DIR, 0o700); } catch (_) {}
@@ -49,6 +52,7 @@ const status = {
   state: 'starting',
   mode: MODE,
   launchMode: LAUNCH_MODE,
+  authMode: AUTH_MODE,
   host: HOST,
   port: PORT,
   supervisorPid: process.pid,
@@ -81,6 +85,7 @@ let ngrokRestartTimer = null;
 let ngrokRestartDelayMs = 3000;
 let ngrokOutputTail = '';
 let shutdownTimer = null;
+let announcedHealthy = false;
 const startupDeadline = Date.now() + HEALTH_START_TIMEOUT_MS;
 
 function hydrateDesktopEnvironment() {
@@ -156,22 +161,37 @@ function persistStatus() {
 }
 
 function log(message, level = 'INFO') {
-  const line = `[SUPERVISOR ${level}] ${new Date().toISOString()} ${redactText(message)}`;
-  process.stderr.write(`${line}\n`);
+  const category = level === 'ERROR' ? 'ERROR' : level === 'WARN' ? 'AVISO' : 'SERVICIO';
+  humanEvent(category, redactText(message));
 }
 
 function attachLogs(child, fileStream, label, onChunk = null) {
-  const forward = (stream, destination) => {
+  const buffers = new Map();
+  const consume = (stream, destination) => {
+    buffers.set(stream, '');
     stream.on('data', (chunk) => {
+      const text = chunk.toString('utf8');
       try { fileStream.write(chunk); } catch (_) {}
-      try { destination.write(`[${label}] ${chunk.toString('utf8')}`); } catch (_) {}
       if (onChunk) {
-        try { onChunk(chunk.toString('utf8')); } catch (_) {}
+        try { onChunk(text); } catch (_) {}
+      }
+
+      let buffer = `${buffers.get(stream) || ''}${text}`;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || '';
+      buffers.set(stream, buffer);
+      for (const line of lines) {
+        if (!line) continue;
+        if (/^\d{4}-\d{2}-\d{2}T.*\|\s*[A-ZÁÉÍÓÚÑ]+\s*\|/.test(line)) {
+          try { destination.write(`${line}\n`); } catch (_) {}
+        } else if (label === 'mcp' && /\b(error|fatal|uncaught|exception)\b/i.test(line)) {
+          humanEvent('ERROR', `El servidor MCP informó: ${redactText(line)}`);
+        }
       }
     });
   };
-  forward(child.stdout, process.stdout);
-  forward(child.stderr, process.stderr);
+  consume(child.stdout, process.stdout);
+  consume(child.stderr, process.stderr);
 }
 
 function requestJson(host, port, requestPath, timeoutMs = 2000) {
@@ -206,7 +226,8 @@ function setPublicUrl(url) {
     writeAtomic(CHATGPT_URL_PATH, `${status.chatgptUrl}\n`);
     status.lastTunnelAt = new Date().toISOString();
     if (changed) {
-      log(`Tunel listo. URL PARA CHATGPT: ${status.chatgptUrl}`);
+      if (MODE === 'ngrok') persistDetectedNgrokUrl(normalized);
+      log(`Túnel público listo. URL para agregar en ChatGPT: ${status.chatgptUrl}`);
     }
   } else {
     removeFile(PUBLIC_URL_PATH);
@@ -220,7 +241,7 @@ function childExited(child) {
 }
 
 function spawnServer() {
-  log(`Iniciando MCP HTTP en http://${HOST}:${PORT}`);
+  log(`Iniciando el servidor MCP local en el puerto ${PORT}.`);
   serverChild = spawn(process.execPath, [path.join(ROOT, 'mcp-server.js'), '--http'], {
     cwd: ROOT,
     env: process.env,
@@ -257,12 +278,61 @@ function normalizeNgrokUrl(value) {
   return `https://${raw}`;
 }
 
+function persistDetectedNgrokUrl(url) {
+  if (CONFIGURED_NGROK_URL || String(process.env.MCP_PERSIST_DETECTED_NGROK_URL || '1') === '0') return;
+  const envPath = path.join(ROOT, '.env');
+  try {
+    const value = normalizeNgrokUrl(url);
+    if (!value || !fs.existsSync(envPath)) return;
+    const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+    const updates = new Map([
+      ['NGROK_URL', value],
+      ['MCP_PUBLIC_BASE_URL', value]
+    ]);
+    const found = new Set();
+    const output = lines.map((line) => {
+      const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=/);
+      if (match && updates.has(match[1])) {
+        found.add(match[1]);
+        return `${match[1]}=${updates.get(match[1])}`;
+      }
+      return line;
+    });
+    for (const [key, configured] of updates) {
+      if (!found.has(key)) output.push(`${key}=${configured}`);
+    }
+    const temporary = `${envPath}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, `${output.join('\n').replace(/\n+$/, '')}\n`, { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(temporary, envPath);
+    try { fs.chmodSync(envPath, 0o600); } catch (_) {}
+    humanEvent('CONFIGURACION', `La URL detectada de ngrok quedó guardada para próximos inicios: ${value}`);
+  } catch (error) {
+    log(`No se pudo guardar automáticamente la URL de ngrok: ${error.message}`, 'WARN');
+  }
+}
+
 function ngrokArgs() {
   const args = ['http', `http://${LOCAL_HOST}:${PORT}`, '--log=stdout'];
   if (process.env.NGROK_CONFIG) args.push('--config', process.env.NGROK_CONFIG);
   const endpointUrl = normalizeNgrokUrl(process.env.NGROK_URL || process.env.NGROK_DOMAIN);
   if (endpointUrl) args.push('--url', endpointUrl);
   return args;
+}
+
+function describeNgrokFailure(output, payload = {}) {
+  const text = redactText(output || '');
+  const rules = [
+    [/ERR_NGROK_(?:105|106|107|108|4018)|authentication failed|authtoken/i, 'ngrok rechazó la autenticación. Revisá el authtoken privado con ./mcpctl.sh configure.'],
+    [/ERR_NGROK_313|custom domain|reserved domain|endpoint.*not.*available/i, 'El dominio solicitado no está disponible para esta cuenta o plan de ngrok.'],
+    [/ERR_NGROK_334|already online|already.*endpoint/i, 'Ese endpoint de ngrok ya está activo en otro proceso o equipo. Cerralo allí antes de reintentar.'],
+    [/ERR_NGROK_(?:324|6024)|too many|limit.*endpoint/i, 'La cuenta de ngrok alcanzó un límite de agentes o endpoints activos.'],
+    [/connection refused|failed to connect|upstream/i, `ngrok no pudo comunicarse con el servidor MCP local en ${LOCAL_HOST}:${PORT}.`]
+  ];
+  for (const [pattern, description] of rules) {
+    if (pattern.test(text)) return description;
+  }
+  const code = payload.error || payload.signal || payload.code;
+  return `ngrok se detuvo${code !== undefined && code !== null ? ` (estado ${code})` : ''}. Consultá ./mcpctl.sh logs-raw para el detalle técnico.`;
 }
 
 function scheduleNgrokRestart(reason) {
@@ -281,7 +351,7 @@ function scheduleNgrokRestart(reason) {
 function spawnNgrok() {
   if (stopping || MODE !== 'ngrok' || ngrokChild) return;
   setPublicUrl('');
-  log(`Iniciando ngrok hacia http://${LOCAL_HOST}:${PORT}`);
+  log(`Abriendo el túnel HTTPS de ngrok hacia el servidor local.`);
   ngrokChild = spawn(NGROK_BIN, ngrokArgs(), {
     cwd: ROOT,
     env: process.env,
@@ -308,7 +378,7 @@ function spawnNgrok() {
     status.lastNgrokExit = { ...payload, output: status.ngrokLastOutput };
     ngrokChild = null;
     setPublicUrl('');
-    if (!stopping) scheduleNgrokRestart(`ngrok termino: ${payload.error || payload.signal || payload.code}`);
+    if (!stopping) scheduleNgrokRestart(describeNgrokFailure(status.ngrokLastOutput, payload));
   };
 
   ngrokChild.on('error', (error) => handleFailure({ at: new Date().toISOString(), error: error.message }));
@@ -323,6 +393,10 @@ async function checkHealth() {
   status.serverRunning = Boolean(serverChild && !childExited(serverChild));
 
   if (status.serverHealthy) {
+    if (!announcedHealthy) {
+      announcedHealthy = true;
+      log(`Servidor MCP local listo. Autenticación: ${AUTH_MODE}.`);
+    }
     if (MODE === 'ngrok' && !ngrokChild && !ngrokRestartTimer) spawnNgrok();
   } else if (Date.now() >= startupDeadline) {
     status.lastError = `El MCP no supero el health check en ${HEALTH_START_TIMEOUT_MS} ms: ${result.error || result.statusCode || 'sin respuesta'}`;
@@ -424,7 +498,7 @@ process.on('SIGHUP', () => shutdown(0, 'SIGHUP'));
 process.on('uncaughtException', (error) => shutdown(1, `uncaughtException: ${error.stack || error.message}`));
 process.on('unhandledRejection', (error) => shutdown(1, `unhandledRejection: ${error && (error.stack || error.message) || error}`));
 
-log(`Supervisor iniciado (pid=${process.pid}, mode=${MODE}, launch=${LAUNCH_MODE})`);
+log(`Administrador MCP iniciado en modo ${LAUNCH_MODE === 'persistent' ? 'persistente' : 'temporal'}, exposición ${MODE} y autenticación ${AUTH_MODE}.`);
 spawnServer();
 configureExposure();
 healthTimer = setInterval(() => { checkHealth().catch((error) => log(`health check: ${error.message}`, 'WARN')); }, 2000);

@@ -1,89 +1,16 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 cd "$(dirname "$0")"
 export PATH="$HOME/.local/bin:$PATH"
 
-line() { printf '%*s\n' 72 '' | tr ' ' '='; }
 info() { printf '[INFO] %s\n' "$*"; }
-warn() { printf '[WARN] %s\n' "$*" >&2; }
+warn() { printf '[AVISO] %s\n' "$*" >&2; }
+err() { printf '[ERROR] %s\n' "$*" >&2; }
 
-INTERACTIVE=0
-if [ -t 0 ] && [ -t 1 ]; then INTERACTIVE=1; fi
-
-line
-echo " MCP Local Full Control - preparacion"
-line
-
-chmod +x ./install-deps.sh ./install-ngrok.sh 2>/dev/null || true
+chmod +x ./install-deps.sh ./install-ngrok.sh ./configure-mcp.sh ./oauth-admin.js ./log-viewer.js 2>/dev/null || true
 ./install-deps.sh
-
-if [ ! -f .env ]; then
-  info "Primera ejecucion: creando .env"
-  cp .env.example .env
-  DEFAULT_ROOT="$(cd .. && pwd -P)"
-  node - "$DEFAULT_ROOT" <<'NODE'
-const fs = require('fs');
-const root = process.argv[2];
-let content = fs.readFileSync('.env', 'utf8');
-content = content.replace(/^WORKING_DIR=.*$/m, `WORKING_DIR=${root}`);
-content = content.replace(/^ALLOWED_PATHS=.*$/m, `ALLOWED_PATHS=${root}`);
-fs.writeFileSync('.env', content);
-NODE
-
-  ACCESS_CHOICE="${MCP_SETUP_ACCESS_CHOICE:-1}"
-  MODE_CHOICE="${MCP_SETUP_MODE_CHOICE:-1}"
-  if [ "$INTERACTIVE" = "1" ]; then
-    echo "Elegir nivel de acceso inicial:"
-    echo "  1) RESTRINGIDO: solo ALLOWED_PATHS"
-    echo "  2) FULL CONTROL: todo lo permitido por el usuario"
-    read -r -p "Opcion [1]: " ACCESS_INPUT
-    ACCESS_CHOICE=${ACCESS_INPUT:-1}
-
-    echo ""
-    echo "Como se publicara el MCP:"
-    echo "  1) NGROK"
-    echo "  2) URL HTTPS PROPIA"
-    echo "  3) SOLO LOCAL"
-    read -r -p "Opcion [1]: " MODE_INPUT
-    MODE_CHOICE=${MODE_INPUT:-1}
-  else
-    info "Modo no interactivo: usando acceso restringido y ngrok por defecto."
-  fi
-
-  if [ "$ACCESS_CHOICE" = "2" ]; then
-    sed -i 's/^MCP_FULL_ACCESS=.*/MCP_FULL_ACCESS=1/' .env
-  else
-    sed -i 's/^MCP_FULL_ACCESS=.*/MCP_FULL_ACCESS=0/' .env
-  fi
-
-  case "$MODE_CHOICE" in
-    2)
-      PUBLIC_URL_INPUT="${PUBLIC_BASE_URL:-}"
-      if [ "$INTERACTIVE" = "1" ]; then
-        read -r -p "URL publica HTTPS sin /mcp: " PUBLIC_URL_INPUT
-      fi
-      sed -i 's/^MCP_EXPOSURE_MODE=.*/MCP_EXPOSURE_MODE=direct/' .env
-      node - "$PUBLIC_URL_INPUT" <<'NODE'
-const fs = require('fs');
-const url = String(process.argv[2] || '').replace(/\/+$/, '');
-let content = fs.readFileSync('.env', 'utf8');
-content = content.replace(/^PUBLIC_BASE_URL=.*$/m, `PUBLIC_BASE_URL=${url}`);
-fs.writeFileSync('.env', content);
-NODE
-      ;;
-    3)
-      sed -i 's/^MCP_EXPOSURE_MODE=.*/MCP_EXPOSURE_MODE=local/; s|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=|' .env
-      ;;
-    *)
-      sed -i 's/^MCP_EXPOSURE_MODE=.*/MCP_EXPOSURE_MODE=ngrok/; s|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=|' .env
-      ;;
-  esac
-fi
-
-chmod 600 .env 2>/dev/null || true
-mkdir -p .runtime
-chmod 700 .runtime 2>/dev/null || true
+install -d -m 0700 .runtime .private
 
 read_config() {
   node - "$1" "$2" <<'NODE'
@@ -95,61 +22,128 @@ process.stdout.write(String(process.env[key] ?? env[key] ?? fallback));
 NODE
 }
 
+read_secret_file() {
+  local configured="$1" file
+  [ -n "$configured" ] || return 0
+  if [[ "$configured" = /* ]]; then file="$configured"; else file="$PWD/$configured"; fi
+  [ -f "$file" ] || return 0
+  tr -d '\r\n' <"$file"
+}
+
+set_config() {
+  python3 - .env "$@" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); updates={item.split('=',1)[0]:item.split('=',1)[1] for item in sys.argv[2:]}
+lines=p.read_text().splitlines() if p.exists() else []; out=[]; seen=set()
+for line in lines:
+    if line.strip() and not line.lstrip().startswith('#') and '=' in line:
+        key=line.split('=',1)[0].strip()
+        if key in updates:
+            out.append(f'{key}={updates[key]}'); seen.add(key); continue
+    out.append(line)
+for key,value in updates.items():
+    if key not in seen: out.append(f'{key}={value}')
+p.write_text('\n'.join(out).rstrip()+'\n'); p.chmod(0o600)
+PY
+}
+
+migrate_existing_config() {
+  local auth_mode public_base mode token
+  mode="$(read_config MCP_EXPOSURE_MODE ngrok)"
+  token="$(read_config MCP_AUTH_TOKEN '')"
+  auth_mode="$(read_config MCP_AUTH_MODE '')"
+  if [ -z "$auth_mode" ]; then
+    if [ -n "$token" ]; then auth_mode='bearer'; else auth_mode='none'; fi
+  fi
+  public_base="$(read_config MCP_PUBLIC_BASE_URL '')"
+  if [ -z "$public_base" ]; then
+    if [ "$mode" = 'ngrok' ]; then public_base="$(read_config NGROK_URL "$(read_config NGROK_DOMAIN '')")"; fi
+    if [ "$mode" = 'direct' ]; then public_base="$(read_config PUBLIC_BASE_URL '')"; fi
+  fi
+  if [ "$auth_mode" = 'bearer' ] && [ -n "$token" ]; then
+    umask 077
+    printf '%s\n' "$token" > .private/bearer-token.txt
+    chmod 600 .private/bearer-token.txt
+    token=''
+  fi
+  set_config \
+    "MCP_AUTH_MODE=$auth_mode" \
+    "MCP_AUTH_TOKEN=$token" \
+    'MCP_AUTH_TOKEN_FILE=.private/bearer-token.txt' \
+    "MCP_PUBLIC_BASE_URL=$public_base" \
+    'MCP_SETUP_COMPLETE=1' \
+    'MCP_SETUP_VERSION=4' \
+    'MCP_HUMAN_LOG=.runtime/events.log' \
+    'ACTIVITY_LOG=.runtime/activity.ndjson'
+  if [ "$auth_mode" = 'none' ] && [ "$mode" != 'local' ]; then
+    set_config 'MCP_ALLOW_UNSAFE_NO_AUTH=1'
+    warn 'Se conservó la instalación existente sin autenticación. Ejecutá ./mcpctl.sh configure para activar OAuth.'
+  fi
+}
+
+if [ ! -f .env ] || [ "${MCP_FORCE_SETUP:-0}" = '1' ] || [ "${1:-}" = '--reconfigure' ]; then
+  ./configure-mcp.sh
+else
+  chmod 600 .env
+  SETUP_MARKER="$(read_config MCP_SETUP_COMPLETE '')"
+  if [ "$SETUP_MARKER" = '0' ]; then
+    info 'El archivo .env existe, pero la configuración inicial todavía no fue completada.'
+    ./configure-mcp.sh
+  elif [ -z "$SETUP_MARKER" ]; then
+    info 'Actualizando la configuración existente al nuevo formato sin cambiar su acceso.'
+    migrate_existing_config
+  fi
+fi
+
 MODE="$(read_config MCP_EXPOSURE_MODE ngrok)"
+AUTH_MODE="$(read_config MCP_AUTH_MODE none)"
 FULL_ACCESS="$(read_config MCP_FULL_ACCESS 0)"
-AUTH_TOKEN="$(read_config MCP_AUTH_TOKEN '')"
-PUBLIC_URL="$(read_config PUBLIC_BASE_URL '')"
+PUBLIC_URL="$(read_config MCP_PUBLIC_BASE_URL '')"
 
-if [ "$MODE" = "direct" ] && [ -z "$PUBLIC_URL" ]; then
-  warn "MCP_EXPOSURE_MODE=direct requiere PUBLIC_BASE_URL en .env"
-  exit 1
-fi
-
-if [ "$MODE" = "ngrok" ]; then
-  if ! command -v ngrok >/dev/null 2>&1; then
-    INSTALL_NGROK="${MCP_INSTALL_NGROK:-1}"
-    if [ "$INTERACTIVE" = "1" ]; then
-      read -r -p "ngrok no esta instalado. Instalarlo ahora? [S/n]: " ANSWER
-      case "${ANSWER:-S}" in n|N) INSTALL_NGROK=0 ;; *) INSTALL_NGROK=1 ;; esac
-    fi
-    if [ "$INSTALL_NGROK" = "1" ]; then ./install-ngrok.sh; fi
-  fi
-
+if [ "$MODE" = 'ngrok' ]; then
   NGROK_BIN_VALUE="$(read_config NGROK_BIN '')"
-  if [ -z "$NGROK_BIN_VALUE" ]; then
-    NGROK_BIN_VALUE="$(command -v ngrok 2>/dev/null || true)"
+  [ -n "$NGROK_BIN_VALUE" ] || NGROK_BIN_VALUE="$(command -v ngrok 2>/dev/null || true)"
+  if [ -z "$NGROK_BIN_VALUE" ] || [ ! -x "$NGROK_BIN_VALUE" ]; then
+    err 'ngrok está seleccionado pero no se encuentra instalado. Ejecutá ./mcpctl.sh configure.'
+    exit 1
   fi
-
-  if [ -n "$NGROK_BIN_VALUE" ] && [ -x "$NGROK_BIN_VALUE" ]; then
-    CONFIGURED_NGROK_CONFIG="$(read_config NGROK_CONFIG '')"
-    if [ -n "$CONFIGURED_NGROK_CONFIG" ]; then
-      CONFIGURED_NGROK_CONFIG="$(readlink -f "$CONFIGURED_NGROK_CONFIG" 2>/dev/null || printf '%s' "$CONFIGURED_NGROK_CONFIG")"
-      EFFECTIVE_CHECK_OUTPUT=""
-      if EFFECTIVE_CHECK_OUTPUT="$("$NGROK_BIN_VALUE" config check --config "$CONFIGURED_NGROK_CONFIG" 2>&1)"; then
-        info "Configuracion de ngrok validada: $CONFIGURED_NGROK_CONFIG"
-      else
-        warn "La configuracion efectiva de ngrok no es valida: ${EFFECTIVE_CHECK_OUTPUT//$'\n'/ }"
-        warn "No la reemplazo automaticamente. Ejecuta: ./configure-ngrok.sh"
-      fi
-    else
-      DEFAULT_CHECK_OUTPUT=""
-      if DEFAULT_CHECK_OUTPUT="$("$NGROK_BIN_VALUE" config check 2>&1)"; then
-        DEFAULT_CONFIG_PATH="$(printf '%s\n' "$DEFAULT_CHECK_OUTPUT" | sed -n 's/^Valid configuration file at //p' | tail -n1)"
-        [ -z "$DEFAULT_CONFIG_PATH" ] || info "Configuracion predeterminada de ngrok: $DEFAULT_CONFIG_PATH"
-      else
-        warn "La configuracion predeterminada de ngrok no pudo validarse: ${DEFAULT_CHECK_OUTPUT//$'\n'/ }"
-        warn "Ejecuta: ./configure-ngrok.sh"
-      fi
-    fi
+  NGROK_CONFIG_VALUE="$(read_config NGROK_CONFIG '')"
+  if [ -n "$NGROK_CONFIG_VALUE" ]; then
+    "$NGROK_BIN_VALUE" config check --config "$NGROK_CONFIG_VALUE" >/dev/null 2>&1 || {
+      err 'La configuración privada de ngrok no es válida. Ejecutá ./mcpctl.sh configure.'
+      exit 1
+    }
   else
-    warn "ngrok no esta disponible; el MCP local iniciara, pero no tendra URL publica."
+    "$NGROK_BIN_VALUE" config check >/dev/null 2>&1 || {
+      err 'ngrok no tiene un authtoken válido. Ejecutá ./mcpctl.sh configure.'
+      exit 1
+    }
   fi
 fi
 
-if [ "$FULL_ACCESS" = "1" ] && [ -z "$AUTH_TOKEN" ] && [ "$MODE" != "local" ]; then
-  warn "FULL CONTROL se publicara sin bearer token. Revisa MCP_AUTH_TOKEN en .env."
-elif [ -z "$AUTH_TOKEN" ] && [ "$MODE" != "local" ]; then
-  warn "El MCP se publicara sin bearer token."
+if [ "$AUTH_MODE" = 'oauth' ]; then
+  [ -n "$PUBLIC_URL" ] || { err 'OAuth requiere una URL pública estable. Ejecutá ./mcpctl.sh configure.'; exit 1; }
+  case "$PUBLIC_URL" in https://*) ;; *) err 'OAuth requiere HTTPS. Elegí ngrok o una URL HTTPS propia.'; exit 1 ;; esac
+  node oauth-admin.js status | grep -q 'Configurado: sí' || {
+    err 'OAuth está seleccionado pero todavía no tiene usuario/contraseña. Ejecutá ./mcpctl.sh configure.'
+    exit 1
+  }
+elif [ "$AUTH_MODE" = 'bearer' ]; then
+  BEARER_VALUE="$(read_config MCP_AUTH_TOKEN '')"
+  if [ -z "$BEARER_VALUE" ]; then
+    BEARER_VALUE="$(read_secret_file "$(read_config MCP_AUTH_TOKEN_FILE '.private/bearer-token.txt')")"
+  fi
+  [ -n "$BEARER_VALUE" ] || { err 'El modo Bearer no tiene token configurado.'; exit 1; }
+  [ "${#BEARER_VALUE}" -ge 32 ] || { err 'El token Bearer anterior es demasiado corto. Ejecutá ./mcpctl.sh configure para generar uno seguro.'; exit 1; }
+  if [ "$MODE" != 'local' ] && [[ "$PUBLIC_URL" = http://* ]] \
+     && [ "$(read_config MCP_ALLOW_INSECURE_HTTP_AUTH 0)" != '1' ]; then
+    err 'Bearer sobre HTTP está bloqueado porque el token viajaría sin cifrado. Usá ngrok/HTTPS o reconfigurá explícitamente para una prueba temporal.'
+    exit 1
+  fi
+elif [ "$AUTH_MODE" = 'none' ] && [ "$MODE" != 'local' ]; then
+  [ "$(read_config MCP_ALLOW_UNSAFE_NO_AUTH 0)" = '1' ] || { err 'Publicar sin autenticación requiere reconfigurar y confirmar el riesgo.'; exit 1; }
+  warn 'El servidor se publicará sin autenticación. No lo dejes activo permanentemente salvo que sea una decisión explícita.'
 fi
 
-info "Preparacion completa: modo=$MODE, full_access=$FULL_ACCESS"
+info "Preparación completa: exposición=$MODE, autenticación=$AUTH_MODE, full_access=$FULL_ACCESS"

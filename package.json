@@ -1,28 +1,36 @@
 {
   "name": "mcp-server-local",
-  "version": "3.3.2",
-  "description": "MCP local full-control para ChatGPT, Codex, Claude y otros clientes MCP",
+  "version": "4.0.0",
+  "description": "Servidor MCP local/privado con control del equipo, asistente inicial, OAuth 2.1 y registros legibles",
   "main": "mcp-server.js",
   "scripts": {
-    "test": "npm run check",
-    "check": "node --check mcp-server.js && node --check full-control-tools.js && node --check runtime-diagnostics.js && node --check mcp-supervisor.js && python3 -m py_compile desktop-control.py && bash -n start-mcp.sh && bash -n setup-mcp.sh && bash -n configure-ngrok.sh && bash -n install-service.sh && bash -n mcpctl.sh && bash -n install-deps.sh && bash -n install-ngrok.sh && bash -n self-test.sh",
+    "test": "npm run check && node auth-mode-self-test.js && node oauth-self-test.js && ./setup-self-test.sh",
+    "check": "node --check mcp-server.js && node --check full-control-tools.js && node --check runtime-diagnostics.js && node --check mcp-supervisor.js && node --check human-log.js && node --check log-viewer.js && node --check oauth-provider.js && node --check oauth-admin.js && node --check chatgpt-guide.js && node --check oauth-self-test.js && node --check auth-mode-self-test.js && python3 -m py_compile desktop-control.py && bash -n start-mcp.sh setup-mcp.sh configure-mcp.sh configure-ngrok.sh install-service.sh mcpctl.sh install-deps.sh install-ngrok.sh self-test.sh setup-self-test.sh",
     "selftest": "./self-test.sh",
     "start": "node mcp-server.js --http",
     "stdio": "node mcp-server.js --stdio",
     "dev": "node --watch mcp-server.js --http",
     "tunnel": "./start-mcp.sh",
     "tunnel:win": "start-mcp.cmd",
+    "configure": "./configure-mcp.sh",
+    "logs": "./mcpctl.sh logs",
+    "oauth:test": "node oauth-self-test.js",
+    "setup:test": "./setup-self-test.sh",
     "doctor": "node runtime-diagnostics.js doctor",
     "service": "./start-mcp.sh --persistent",
     "temporary": "./start-mcp.sh --temporary",
-    "persistent": "./start-mcp.sh --persistent"
+    "persistent": "./start-mcp.sh --persistent",
+    "auth:test": "node auth-mode-self-test.js"
   },
   "keywords": [
     "mcp",
     "model-context-protocol",
     "filesystem",
     "chatgpt",
-    "claude"
+    "claude",
+    "oauth",
+    "ngrok",
+    "full-control"
   ],
   "author": "",
   "license": "MIT",
