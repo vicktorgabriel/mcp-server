@@ -46,6 +46,11 @@ async function main() {
   const accessProfile = status.config && (status.config.accessProfileLabel || status.config.accessProfile)
     || env.MCP_ACCESS_PROFILE
     || 'developer';
+  const toolCount = status.config && Number.isInteger(status.config.allowedToolCount)
+    ? status.config.allowedToolCount
+    : 'desconocida';
+  const executionMode = status.config && status.config.runAsRoot ? 'root (riesgo alto)' : 'usuario normal';
+  const confirmationMode = status.config && status.config.criticalConfirmations === false ? 'desactivadas (riesgo alto)' : 'activadas';
 
   process.stdout.write(`
 ========================================================================
@@ -56,7 +61,11 @@ URL del servidor:
   ${endpoint}
 
 Perfil de herramientas:
-  ${accessProfile}
+  ${accessProfile} (${toolCount} herramientas)
+Cuenta del proceso:
+  ${executionMode}
+Confirmaciones críticas:
+  ${confirmationMode}
 
 Pasos en ChatGPT Web:
 
@@ -91,7 +100,7 @@ Administración local:
   Seguir actividad:       ./mcpctl.sh logs-follow
   Estado y URL:           ./mcpctl.sh status
   Perfil y herramientas:  ./mcpctl.sh permissions --tools
-  Cambiar sólo el perfil: ./mcpctl.sh permissions-set
+  Cambiar acceso experto: ./mcpctl.sh permissions-set
   Modo persistente:       ./start-mcp.sh --persistent
   Reconfigurar/OAuth:     ./mcpctl.sh configure
 

@@ -79,6 +79,9 @@ async function main() {
       MCP_AUTH_MODE: 'oauth',
       MCP_AUTH_TOKEN: '',
       MCP_ACCESS_PROFILE: 'developer',
+      MCP_RUN_AS_ROOT: '1',
+      MCP_TEST_ALLOW_ROOT_FLAG: '1',
+      MCP_CRITICAL_CONFIRMATIONS: '0',
       MCP_PUBLIC_BASE_URL: base,
       PUBLIC_BASE_URL: base,
       MCP_OAUTH_ALLOW_HTTP_LOCALHOST: '1',
@@ -164,6 +167,9 @@ async function main() {
     assert.ok(page.includes('127.0.0.1:45891'), 'the consent page must show the exact callback destination');
     assert.ok(page.includes('Desarrollo'), 'the consent page must show the selected access profile');
     assert.ok(page.includes('56'), 'the consent page must show the published tool count');
+    assert.ok(page.includes('Configuración de riesgo alto'), 'the consent page must warn about expert risk settings');
+    assert.ok(page.includes('se ejecuta como root'), 'the consent page must disclose root execution');
+    assert.ok(page.includes('confirmaciones adicionales'), 'the consent page must disclose disabled confirmations');
 
     const authorization = await fetch(`${base}/oauth/authorize`, {
       method: 'POST',

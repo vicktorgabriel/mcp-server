@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { URL, URLSearchParams } = require('url');
 const { humanEvent, redactText } = require('./human-log');
+const { applyPrivateOwnership, ensurePrivateDirectory } = require('./private-owner');
 
 const DEFAULT_SCOPE = 'mcp:tools';
 const OFFLINE_SCOPE = 'offline_access';
@@ -119,12 +120,12 @@ class OAuthStateStore {
 
   save() {
     const directory = path.dirname(this.filePath);
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-    try { fs.chmodSync(directory, 0o700); } catch (_) {}
+    ensurePrivateDirectory(directory, 0o700);
     const temporary = `${this.filePath}.${process.pid}.${randomValue(5)}.tmp`;
     fs.writeFileSync(temporary, `${JSON.stringify(this.state, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    applyPrivateOwnership(temporary, 0o600);
     fs.renameSync(temporary, this.filePath);
-    try { fs.chmodSync(this.filePath, 0o600); } catch (_) {}
+    applyPrivateOwnership(this.filePath, 0o600);
   }
 
   cleanup() {
@@ -561,13 +562,26 @@ class OAuthProvider {
     return false;
   }
 
+  accessRiskNotice() {
+    const risks = [];
+    if (this.accessSummary.runAsRoot) {
+      risks.push('Este MCP se ejecuta como root y puede modificar todo el sistema.');
+    }
+    if (this.accessSummary.criticalConfirmations === false) {
+      risks.push('Las confirmaciones adicionales para borrado, paquetes, firewall, montajes, contenedores y energía están desactivadas.');
+    }
+    if (risks.length === 0) return '';
+    return `<div class="risk"><strong>Configuración de riesgo alto:</strong><ul>${risks.map((risk) => `<li>${htmlEscape(risk)}</li>`).join('')}</ul></div>`;
+  }
+
   renderHelp(issuer) {
     return `<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MCP OAuth</title>
-<style>body{font-family:system-ui,sans-serif;max-width:720px;margin:4rem auto;padding:0 1.2rem;color:#18212b}code{background:#eef2f6;padding:.15rem .35rem;border-radius:.3rem}h1{font-size:1.7rem}</style></head>
+<style>body{font-family:system-ui,sans-serif;max-width:720px;margin:4rem auto;padding:0 1.2rem;color:#18212b}code{background:#eef2f6;padding:.15rem .35rem;border-radius:.3rem}h1{font-size:1.7rem}.risk{background:#fff1f1;border:1px solid #e4a1a1;color:#821515;padding:12px 16px;border-radius:10px;margin:16px 0}.risk ul{margin-bottom:0}</style></head>
 <body><h1>Autenticación OAuth del servidor MCP</h1><p>Este servidor usa OAuth 2.1 con autorización por código, PKCE S256 y refresh tokens.</p>
 <p>Endpoint MCP: <code>${htmlEscape(`${issuer}/mcp`)}</code></p>
 <p>Perfil publicado: <strong>${htmlEscape(this.accessSummary.label || this.accessSummary.profile)}</strong> (${Number(this.accessSummary.allowedToolCount || 0)} herramientas).</p>
+${this.accessRiskNotice()}
 <p>Agregalo desde ChatGPT en modo desarrollador y elegí OAuth. ChatGPT descubrirá automáticamente estos endpoints.</p></body></html>`;
   }
 
@@ -781,10 +795,11 @@ class OAuthProvider {
     })();
     return `<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Autorizar MCP</title>
-<style>body{font-family:system-ui,sans-serif;background:#f4f7fb;margin:0;color:#15202b}.card{max-width:520px;margin:7vh auto;background:white;border-radius:16px;padding:28px;box-shadow:0 12px 40px #10243a22}h1{font-size:1.45rem;margin-top:0}.muted{color:#5d6975;font-size:.94rem}.notice{background:#eef6ff;border:1px solid #bddbff;padding:12px;border-radius:10px;margin:16px 0}.error{background:#fff1f1;border:1px solid #e5a8a8;color:#8b1c1c;padding:10px;border-radius:8px}label{display:block;margin-top:14px;font-weight:600}input{box-sizing:border-box;width:100%;padding:11px;margin-top:5px;border:1px solid #bac5d0;border-radius:8px;font-size:1rem}.actions{display:flex;gap:10px;margin-top:22px}.primary,.deny{border:0;border-radius:8px;padding:11px 15px;font-size:1rem;cursor:pointer}.primary{background:#1769e0;color:white;flex:1}.deny{background:#e9edf2;color:#26323d}</style></head>
+<style>body{font-family:system-ui,sans-serif;background:#f4f7fb;margin:0;color:#15202b}.card{max-width:520px;margin:7vh auto;background:white;border-radius:16px;padding:28px;box-shadow:0 12px 40px #10243a22}h1{font-size:1.45rem;margin-top:0}.muted{color:#5d6975;font-size:.94rem}.notice{background:#eef6ff;border:1px solid #bddbff;padding:12px;border-radius:10px;margin:16px 0}.risk{background:#fff1f1;border:1px solid #e5a8a8;color:#8b1c1c;padding:10px 14px;border-radius:8px;margin:16px 0}.risk ul{margin-bottom:0}.error{background:#fff1f1;border:1px solid #e5a8a8;color:#8b1c1c;padding:10px;border-radius:8px}label{display:block;margin-top:14px;font-weight:600}input{box-sizing:border-box;width:100%;padding:11px;margin-top:5px;border:1px solid #bac5d0;border-radius:8px;font-size:1rem}.actions{display:flex;gap:10px;margin-top:22px}.primary,.deny{border:0;border-radius:8px;padding:11px 15px;font-size:1rem;cursor:pointer}.primary{background:#1769e0;color:white;flex:1}.deny{background:#e9edf2;color:#26323d}</style></head>
 <body><main class="card"><h1>Autorizar acceso al servidor MCP</h1>
 <p><strong>${htmlEscape(client.clientName)}</strong> solicita usar las herramientas configuradas en este equipo.</p>
 <div class="notice"><strong>Destino de retorno:</strong> ${htmlEscape(redirectHost)}<br><strong>Perfil autorizado:</strong> ${htmlEscape(this.accessSummary.label || this.accessSummary.profile)}<br><strong>Herramientas publicadas:</strong> ${Number(this.accessSummary.allowedToolCount || 0)}</div>
+${this.accessRiskNotice()}
 <p class="muted">Autorizá únicamente si vos acabás de agregar este servidor en ChatGPT y reconocés el destino mostrado.</p>
 ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
 <form method="post" action="/oauth/authorize"><input type="hidden" name="transaction" value="${htmlEscape(transactionId)}">

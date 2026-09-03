@@ -3,9 +3,18 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 ROOT_DIR="$(pwd -P)"
+if [ "$(id -u)" -eq 0 ]; then
+  OWNER_USER="${SUDO_USER:-$(stat -c '%U' "$ROOT_DIR" 2>/dev/null || echo root)}"
+  if id "$OWNER_USER" >/dev/null 2>&1; then
+    export MCP_REPO_OWNER_UID="${MCP_REPO_OWNER_UID:-$(id -u "$OWNER_USER")}"
+    export MCP_REPO_OWNER_GID="${MCP_REPO_OWNER_GID:-$(id -g "$OWNER_USER")}"
+  fi
+fi
 SERVICE="${MCP_SERVICE_NAME:-mcp-local.service}"
 export PATH="$HOME/.local/bin:$PATH"
+export MCP_CONFIG_SOURCE=file
 SETUP_DONE=0
+STARTUP_SUMMARY_SHOWN=0
 
 line() { printf '%*s\n' 72 '' | tr ' ' '='; }
 info() { printf '[INFO] %s\n' "$*"; }
@@ -23,6 +32,87 @@ root_run() {
   fi
 }
 
+read_config() {
+  local key="$1" fallback="${2:-}" line value
+  if [ -f .env ]; then
+    line="$(grep -m1 -E "^${key}=" .env 2>/dev/null || true)"
+    if [ -n "$line" ]; then
+      value="${line#*=}"
+      if [[ "$value" == \"*\" && "$value" == *\" ]] || [[ "$value" == \'*\' && "$value" == *\' ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+      printf '%s' "$value"
+      return 0
+    fi
+  fi
+  if value="$(printenv "$key" 2>/dev/null)"; then
+    printf '%s' "$value"
+    return 0
+  fi
+  printf '%s' "$fallback"
+}
+
+show_startup_logo() {
+  [ "${MCP_STARTUP_LOGO_SHOWN:-0}" = '1' ] && return 0
+  MCP_STARTUP_LOGO_SHOWN=1
+  export MCP_STARTUP_LOGO_SHOWN
+  node startup-banner.js --logo || true
+}
+
+start_update_check() {
+  [ "${MCP_STARTUP_UPDATE_STARTED:-0}" = '1' ] && return 0
+  MCP_STARTUP_UPDATE_STARTED=1
+  export MCP_STARTUP_UPDATE_STARTED
+  if node startup-banner.js --needs-update-check >/dev/null 2>&1; then
+    (node startup-banner.js --check-update --force --notify || true) &
+  fi
+}
+
+show_startup_summary() {
+  [ "$STARTUP_SUMMARY_SHOWN" = '1' ] && return 0
+  STARTUP_SUMMARY_SHOWN=1
+  node startup-banner.js --summary || true
+  echo
+}
+
+prepare_visual_start() {
+  show_startup_logo
+  start_update_check
+}
+
+maybe_reexec_as_root() {
+  local mode="$1" run_as_root repo_uid repo_gid preserve=()
+  run_as_root="$(read_config MCP_RUN_AS_ROOT 0)"
+  [ "$run_as_root" = '1' ] || return 0
+  [ "$(id -u)" -ne 0 ] || {
+    export MCP_REPO_OWNER_UID="${MCP_REPO_OWNER_UID:-$(stat -c '%u' "$ROOT_DIR" 2>/dev/null || echo 0)}"
+    export MCP_REPO_OWNER_GID="${MCP_REPO_OWNER_GID:-$(stat -c '%g' "$ROOT_DIR" 2>/dev/null || echo 0)}"
+    return 0
+  }
+  command -v sudo >/dev/null 2>&1 || { err 'El modo root está habilitado, pero sudo no está disponible.'; return 1; }
+
+  repo_uid="$(stat -c '%u' "$ROOT_DIR" 2>/dev/null || id -u)"
+  repo_gid="$(stat -c '%g' "$ROOT_DIR" 2>/dev/null || id -g)"
+  for variable in DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR WAYLAND_DISPLAY \
+                  XDG_SESSION_TYPE XDG_CURRENT_DESKTOP DESKTOP_SESSION TERM COLORTERM NO_COLOR; do
+    if [ -n "${!variable:-}" ]; then preserve+=("$variable=${!variable}"); fi
+  done
+
+  warn 'Reiniciando el MCP mediante sudo porque elegiste ejecución como root.'
+  warn 'Desde este momento todas las herramientas habilitadas tendrán los permisos de root.'
+  exec sudo -- env \
+    "HOME=$HOME" \
+    "PATH=$PATH" \
+    "MCP_ROOT_REEXEC=1" \
+    "MCP_SETUP_ALREADY_DONE=1" \
+    "MCP_STARTUP_LOGO_SHOWN=1" \
+    "MCP_STARTUP_UPDATE_STARTED=1" \
+    "MCP_REPO_OWNER_UID=$repo_uid" \
+    "MCP_REPO_OWNER_GID=$repo_gid" \
+    "${preserve[@]}" \
+    "$ROOT_DIR/start-mcp.sh" "--$mode"
+}
+
 have_systemd() {
   command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]
 }
@@ -32,11 +122,13 @@ service_exists() {
 }
 
 read_port() {
-  node - <<'NODE'
-const { parseDotEnv } = require('./runtime-diagnostics');
-const value = Number(parseDotEnv().PORT || process.env.PORT || 3000);
-process.stdout.write(String(Number.isInteger(value) && value > 0 && value < 65536 ? value : 3000));
-NODE
+  local value
+  value="$(read_config PORT 3000)"
+  if [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -ge 1 ] && [ "$value" -le 65535 ]; then
+    printf '%s' "$value"
+  else
+    printf '3000'
+  fi
 }
 
 stop_repo_runtime() {
@@ -95,10 +187,13 @@ disable_persistent_service() {
 }
 
 start_temporary() {
-  if [ "$SETUP_DONE" != '1' ]; then
+  prepare_visual_start
+  if [ "$SETUP_DONE" != '1' ] && [ "${MCP_SETUP_ALREADY_DONE:-0}" != '1' ]; then
     ./setup-mcp.sh
     SETUP_DONE=1
   fi
+  maybe_reexec_as_root temporary
+  show_startup_summary
   disable_persistent_service
   stop_repo_runtime
 
@@ -116,7 +211,13 @@ start_temporary() {
 }
 
 start_persistent() {
-  MCP_SETUP_ALREADY_DONE="$SETUP_DONE" ./install-service.sh
+  prepare_visual_start
+  if [ "$SETUP_DONE" != '1' ] && [ "${MCP_SETUP_ALREADY_DONE:-0}" != '1' ]; then
+    ./setup-mcp.sh
+    SETUP_DONE=1
+  fi
+  show_startup_summary
+  MCP_SETUP_ALREADY_DONE=1 ./install-service.sh
   SETUP_DONE=1
 
   if [ -t 0 ] && [ -t 1 ] && [ "${MCP_FOLLOW_PERSISTENT_LOGS:-1}" != "0" ]; then
@@ -169,6 +270,7 @@ Uso:
   ./start-mcp.sh --configure    Reabre el asistente inicial
   ./start-mcp.sh --permissions  Muestra el perfil y las herramientas habilitadas
   ./start-mcp.sh --permissions-set  Cambia sólo el perfil de herramientas
+  ./start-mcp.sh --update-check Comprueba ahora si hay una actualización
   ./start-mcp.sh --chatgpt      Guía para agregarlo a ChatGPT
   ./start-mcp.sh --stop         Detiene el servicio persistente
   ./start-mcp.sh --disable      Detiene y deshabilita el inicio automatico
@@ -205,6 +307,9 @@ case "${1:-}" in
   --permissions-set|--access-set)
     exec ./mcpctl.sh permissions-set
     ;;
+  --update-check)
+    exec ./mcpctl.sh update-check
+    ;;
   --chatgpt)
     exec ./mcpctl.sh chatgpt
     ;;
@@ -235,10 +340,10 @@ case "${1:-}" in
       persistent|service|daemon) start_persistent ;;
       '')
         if [ -t 0 ] && [ -t 1 ]; then
-          if [ ! -f .env ]; then
-            ./setup-mcp.sh
-            SETUP_DONE=1
-          fi
+          prepare_visual_start
+          ./setup-mcp.sh
+          SETUP_DONE=1
+          show_startup_summary
           show_menu
         else
           start_temporary

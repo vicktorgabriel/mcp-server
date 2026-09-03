@@ -82,6 +82,8 @@ OUTPUT="$TEST_ROOT/setup.out"
   MCP_SETUP_ACCESS_CHOICE=1 \
   MCP_SETUP_ALLOWED_PATHS="$TEST_ROOT/allowed" \
   MCP_SETUP_PROFILE_CHOICE=2 \
+  MCP_SETUP_PRIVILEGE_CHOICE=1 \
+  MCP_SETUP_CONFIRMATION_CHOICE=1 \
   MCP_SETUP_MODE_CHOICE=1 \
   MCP_SETUP_NGROK_TOKEN="$TOKEN" \
   MCP_SETUP_NGROK_URL='https://example-device.ngrok.dev' \
@@ -106,6 +108,10 @@ grep -Fxq 'MCP_ACCESS_PROFILE=developer' "$ENV_FILE"
 grep -Fxq 'MCP_ACCESS_GROUPS=' "$ENV_FILE"
 grep -Fxq 'MCP_DESKTOP_ENABLED=1' "$ENV_FILE"
 grep -Fxq 'MCP_INPUT_ENABLED=0' "$ENV_FILE"
+grep -Fxq 'MCP_RUN_AS_ROOT=0' "$ENV_FILE"
+grep -Fxq 'MCP_SERVICE_USER=' "$ENV_FILE"
+grep -Fxq 'MCP_CRITICAL_CONFIRMATIONS=1' "$ENV_FILE"
+grep -Fxq 'MCP_SETUP_VERSION=6' "$ENV_FILE"
 grep -Fxq 'MCP_AUTH_TOKEN=' "$ENV_FILE"
 grep -q "^NGROK_BIN=$TEST_ROOT/bin/ngrok$" "$ENV_FILE"
 grep -Fxq 'NGROK_CONFIG=.private/ngrok.yml' "$ENV_FILE"
@@ -150,6 +156,8 @@ DIRECT_OUTPUT="$TEST_ROOT/direct.out"
   MCP_SETUP_ACCESS_CHOICE=1 \
   MCP_SETUP_ALLOWED_PATHS="$TEST_ROOT/direct-allowed" \
   MCP_SETUP_PROFILE_CHOICE=2 \
+  MCP_SETUP_PRIVILEGE_CHOICE=1 \
+  MCP_SETUP_CONFIRMATION_CHOICE=1 \
   MCP_SETUP_MODE_CHOICE=2 \
   MCP_SETUP_PUBLIC_IP=198.51.100.10 \
   MCP_SETUP_DIRECT_URL=https://direct-device.example \
@@ -166,6 +174,8 @@ grep -Fxq 'PUBLIC_BASE_URL=https://direct-device.example' "$DIRECT_ENV"
 grep -Fxq 'MCP_PUBLIC_BASE_URL=https://direct-device.example' "$DIRECT_ENV"
 grep -Fxq 'MCP_AUTH_MODE=bearer' "$DIRECT_ENV"
 grep -Fxq 'MCP_ACCESS_PROFILE=developer' "$DIRECT_ENV"
+grep -Fxq 'MCP_RUN_AS_ROOT=0' "$DIRECT_ENV"
+grep -Fxq 'MCP_CRITICAL_CONFIRMATIONS=1' "$DIRECT_ENV"
 grep -Fxq 'MCP_AUTH_TOKEN=' "$DIRECT_ENV"
 grep -Fxq 'MCP_AUTH_TOKEN_FILE=.private/bearer-token.txt' "$DIRECT_ENV"
 DIRECT_TOKEN="$(cat "$DIRECT_PRIVATE/bearer-token.txt")"
@@ -180,10 +190,14 @@ DIRECT_TOKEN_BEFORE="$(cat "$DIRECT_PRIVATE/bearer-token.txt")"
   cd "$TEST_ROOT/direct-repo"
   MCP_SETUP_NONINTERACTIVE=1 \
   MCP_SETUP_PROFILE_CHOICE=1 \
+  MCP_SETUP_PRIVILEGE_CHOICE=1 \
+  MCP_SETUP_CONFIRMATION_CHOICE=1 \
   MCP_SETUP_TOOL_DENYLIST='' \
   MCP_SERVICE_NAME=mcp-access-only-test.service ./mcpctl.sh permissions-set >"$TEST_ROOT/access-only.out" 2>&1
 )
 grep -Fxq 'MCP_ACCESS_PROFILE=read_only' "$DIRECT_ENV"
+grep -Fxq 'MCP_RUN_AS_ROOT=0' "$DIRECT_ENV"
+grep -Fxq 'MCP_CRITICAL_CONFIRMATIONS=1' "$DIRECT_ENV"
 grep -Fxq 'MCP_AUTH_MODE=bearer' "$DIRECT_ENV"
 grep -Fxq 'MCP_PUBLIC_BASE_URL=https://direct-device.example' "$DIRECT_ENV"
 [ "$(cat "$DIRECT_PRIVATE/bearer-token.txt")" = "$DIRECT_TOKEN_BEFORE" ]
@@ -201,6 +215,8 @@ rm -rf "$TEST_ROOT/custom-repo/.git" "$TEST_ROOT/custom-repo/.env" "$TEST_ROOT/c
   MCP_SETUP_ACCESS_CHOICE=1 \
   MCP_SETUP_ALLOWED_PATHS="$TEST_ROOT/custom-allowed" \
   MCP_SETUP_PROFILE_CHOICE=5 \
+  MCP_SETUP_PRIVILEGE_CHOICE=1 \
+  MCP_SETUP_CONFIRMATION_CHOICE=1 \
   MCP_SETUP_ACCESS_GROUPS='diagnostics,files_read,files_write,desktop_view' \
   MCP_SETUP_TOOL_DENYLIST='write_file' \
   MCP_SETUP_MODE_CHOICE=3 \
@@ -229,7 +245,127 @@ grep -Fxq 'read_file' <<<"$CUSTOM_TOOLS"
 grep -Fxq 'patch_file' <<<"$CUSTOM_TOOLS"
 ! grep -Fxq 'write_file' <<<"$CUSTOM_TOOLS"
 ! grep -Fxq 'run_command' <<<"$CUSTOM_TOOLS"
+CUSTOM_FILE_PRIORITY_TOOLS="$(
+  cd "$TEST_ROOT/custom-repo"
+  env -i HOME="$HOME" USER="$(id -un)" PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    MCP_CONFIG_SOURCE=file MCP_ACCESS_PROFILE=full MCP_FULL_ACCESS=1 \
+    node - <<'NODE'
+const { spawnSync } = require('child_process');
+const request={jsonrpc:'2.0',id:1,method:'tools/list',params:{}};
+const result=spawnSync(process.execPath,['mcp-server.js','--stdio'],{
+  input:JSON.stringify(request)+'\n',encoding:'utf8',
+  env:{...process.env,MCP_CONFIG_SOURCE:'file',MCP_ACCESS_PROFILE:'full',MCP_FULL_ACCESS:'1'}
+});
+if(result.status!==0){process.stderr.write(result.stderr);process.exit(result.status||1)}
+const names=JSON.parse(result.stdout.trim()).result.tools.map((tool)=>tool.name);
+process.stdout.write(names.join('\n'));
+NODE
+)"
+grep -Fxq 'read_file' <<<"$CUSTOM_FILE_PRIORITY_TOOLS"
+! grep -Fxq 'write_file' <<<"$CUSTOM_FILE_PRIORITY_TOOLS"
+! grep -Fxq 'run_command' <<<"$CUSTOM_FILE_PRIORITY_TOOLS"
+echo 'config_file_priority=OK'
 echo 'custom_tool_profile=OK'
+
+printf '\n== cached dependency verification ==\n'
+(
+  cd "$TEST_ROOT/custom-repo"
+  env -i HOME="$HOME" USER="$(id -un)" PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    MCP_CONFIG_SOURCE=file MCP_INSTALL_OPTIONAL=0 MCP_SETUP_QUIET=0 \
+    ./setup-mcp.sh >"$TEST_ROOT/dependency-first.out" 2>&1
+  env -i HOME="$HOME" USER="$(id -un)" PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    MCP_CONFIG_SOURCE=file MCP_INSTALL_OPTIONAL=0 MCP_SETUP_QUIET=0 \
+    ./setup-mcp.sh >"$TEST_ROOT/dependency-cached.out" 2>&1
+)
+[ -s "$TEST_ROOT/custom-repo/.runtime/dependencies.ready" ]
+grep -q 'Dependencias ya verificadas' "$TEST_ROOT/dependency-cached.out"
+grep -Fxq 'MCP_ACCESS_PROFILE=custom' "$CUSTOM_ENV"
+echo 'dependency_cache=OK'
+
+printf '\n== expert root and no-confirmation setup ==\n'
+mkdir -p "$TEST_ROOT/expert-repo"
+cp -a . "$TEST_ROOT/expert-repo/"
+rm -rf "$TEST_ROOT/expert-repo/.git" "$TEST_ROOT/expert-repo/.env" "$TEST_ROOT/expert-repo/.private" "$TEST_ROOT/expert-repo/.runtime"
+if (
+  cd "$TEST_ROOT/expert-repo"
+  MCP_SETUP_NONINTERACTIVE=1 \
+  MCP_SETUP_PORT=43127 \
+  MCP_SETUP_ACCESS_CHOICE=2 \
+  MCP_SETUP_PROFILE_CHOICE=4 \
+  MCP_SETUP_PRIVILEGE_CHOICE=2 \
+  MCP_SETUP_CONFIRMATION_CHOICE=1 \
+  MCP_SETUP_MODE_CHOICE=3 \
+  ./configure-mcp.sh >"$TEST_ROOT/expert-root-denied.out" 2>&1
+); then
+  echo 'root mode unexpectedly succeeded without explicit acknowledgement' >&2
+  exit 1
+fi
+grep -q 'Root no interactivo requiere' "$TEST_ROOT/expert-root-denied.out"
+rm -f "$TEST_ROOT/expert-repo/.env"
+rm -rf "$TEST_ROOT/expert-repo/.private" "$TEST_ROOT/expert-repo/.runtime"
+if (
+  cd "$TEST_ROOT/expert-repo"
+  MCP_SETUP_NONINTERACTIVE=1 \
+  MCP_SETUP_PORT=43127 \
+  MCP_SETUP_ACCESS_CHOICE=2 \
+  MCP_SETUP_PROFILE_CHOICE=4 \
+  MCP_SETUP_PRIVILEGE_CHOICE=1 \
+  MCP_SETUP_CONFIRMATION_CHOICE=2 \
+  MCP_SETUP_MODE_CHOICE=3 \
+  ./configure-mcp.sh >"$TEST_ROOT/expert-confirm-denied.out" 2>&1
+); then
+  echo 'no-confirmation mode unexpectedly succeeded without explicit acknowledgement' >&2
+  exit 1
+fi
+grep -q 'Desactivar confirmaciones.*requiere' "$TEST_ROOT/expert-confirm-denied.out"
+rm -f "$TEST_ROOT/expert-repo/.env"
+rm -rf "$TEST_ROOT/expert-repo/.private" "$TEST_ROOT/expert-repo/.runtime"
+(
+  cd "$TEST_ROOT/expert-repo"
+  MCP_SETUP_NONINTERACTIVE=1 \
+  MCP_SETUP_PORT=43127 \
+  MCP_SETUP_ACCESS_CHOICE=2 \
+  MCP_SETUP_PROFILE_CHOICE=4 \
+  MCP_SETUP_PRIVILEGE_CHOICE=2 \
+  MCP_SETUP_ALLOW_ROOT=1 \
+  MCP_SETUP_CONFIRMATION_CHOICE=2 \
+  MCP_SETUP_ALLOW_NO_CONFIRMATIONS=1 \
+  MCP_SETUP_MODE_CHOICE=3 \
+  ./configure-mcp.sh >"$TEST_ROOT/expert.out" 2>&1
+)
+EXPERT_ENV="$TEST_ROOT/expert-repo/.env"
+grep -Fxq 'MCP_SETUP_VERSION=6' "$EXPERT_ENV"
+grep -Fxq 'MCP_FULL_ACCESS=1' "$EXPERT_ENV"
+grep -Fxq 'MCP_ACCESS_PROFILE=full' "$EXPERT_ENV"
+grep -Fxq 'MCP_RUN_AS_ROOT=1' "$EXPERT_ENV"
+grep -Fxq 'MCP_SERVICE_USER=root' "$EXPERT_ENV"
+grep -Fxq 'MCP_CRITICAL_CONFIRMATIONS=0' "$EXPERT_ENV"
+grep -Fxq 'MCP_EXPOSURE_MODE=local' "$EXPERT_ENV"
+echo 'expert_root_no_confirmation_setup=OK'
+
+printf '\n== temporary root launcher re-exec ==\n'
+mkdir -p "$TEST_ROOT/root-launcher-bin"
+cat >"$TEST_ROOT/root-launcher-bin/sudo" <<'FAKE_SUDO'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" >"${FAKE_SUDO_CAPTURE:?}"
+FAKE_SUDO
+chmod +x "$TEST_ROOT/root-launcher-bin/sudo"
+(
+  cd "$TEST_ROOT/expert-repo"
+  PATH="$TEST_ROOT/root-launcher-bin:$PATH" \
+  FAKE_SUDO_CAPTURE="$TEST_ROOT/root-launcher.args" \
+  MCP_UPDATE_CHECK=0 MCP_INSTALL_OPTIONAL=0 MCP_SETUP_QUIET=1 \
+  ./start-mcp.sh --temporary >"$TEST_ROOT/root-launcher.out" 2>&1
+)
+grep -Fxq -- '--' "$TEST_ROOT/root-launcher.args"
+grep -Fxq 'env' "$TEST_ROOT/root-launcher.args"
+grep -q '^MCP_REPO_OWNER_UID=' "$TEST_ROOT/root-launcher.args"
+grep -q '^MCP_REPO_OWNER_GID=' "$TEST_ROOT/root-launcher.args"
+grep -Fxq "$TEST_ROOT/expert-repo/start-mcp.sh" "$TEST_ROOT/root-launcher.args"
+grep -Fxq -- '--temporary' "$TEST_ROOT/root-launcher.args"
+grep -q 'Reiniciando el MCP mediante sudo' "$TEST_ROOT/root-launcher.out"
+echo 'temporary_root_reexec=OK'
 
 printf '\n== legacy configuration migration ==\n'
 mkdir -p "$TEST_ROOT/legacy-repo" "$TEST_ROOT/legacy-allowed" "$TEST_ROOT/legacy-private"
@@ -261,9 +397,12 @@ LEGACY_OUTPUT="$TEST_ROOT/legacy.out"
 )
 LEGACY_ENV="$TEST_ROOT/legacy-repo/.env"
 grep -Fxq 'MCP_SETUP_COMPLETE=1' "$LEGACY_ENV"
-grep -Fxq 'MCP_SETUP_VERSION=5' "$LEGACY_ENV"
+grep -Fxq 'MCP_SETUP_VERSION=6' "$LEGACY_ENV"
 grep -Fxq 'MCP_AUTH_MODE=none' "$LEGACY_ENV"
 grep -Fxq 'MCP_ACCESS_PROFILE=full' "$LEGACY_ENV"
+grep -Fxq 'MCP_RUN_AS_ROOT=0' "$LEGACY_ENV"
+grep -Fxq 'MCP_SERVICE_USER=' "$LEGACY_ENV"
+grep -Fxq 'MCP_CRITICAL_CONFIRMATIONS=1' "$LEGACY_ENV"
 grep -Fxq 'MCP_AUTH_TOKEN_FILE=.private/bearer-token.txt' "$LEGACY_ENV"
 grep -Fxq 'MCP_ALLOW_UNSAFE_NO_AUTH=1' "$LEGACY_ENV"
 grep -Fxq 'MCP_PUBLIC_BASE_URL=https://legacy-device.example' "$LEGACY_ENV"
@@ -296,8 +435,10 @@ chmod 600 "$TEST_ROOT/v4-repo/.env"
     PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     MCP_INSTALL_OPTIONAL=0 MCP_SETUP_QUIET=1 ./setup-mcp.sh >"$TEST_ROOT/v4.out" 2>&1
 )
-grep -Fxq 'MCP_SETUP_VERSION=5' "$TEST_ROOT/v4-repo/.env"
+grep -Fxq 'MCP_SETUP_VERSION=6' "$TEST_ROOT/v4-repo/.env"
 grep -Fxq 'MCP_ACCESS_PROFILE=full' "$TEST_ROOT/v4-repo/.env"
+grep -Fxq 'MCP_RUN_AS_ROOT=0' "$TEST_ROOT/v4-repo/.env"
+grep -Fxq 'MCP_CRITICAL_CONFIRMATIONS=1' "$TEST_ROOT/v4-repo/.env"
 ! grep -q 'ASISTENTE INICIAL' "$TEST_ROOT/v4.out"
 echo 'v4_access_profile_migration=OK'
 
@@ -312,13 +453,16 @@ PY
 )"
 cat >"$TEST_ROOT/active-repo/.env" <<EOF_ACTIVE
 MCP_SETUP_COMPLETE=1
-MCP_SETUP_VERSION=5
+MCP_SETUP_VERSION=6
 PORT=$ACTIVE_PORT
 HOST=127.0.0.1
 ALLOWED_PATHS=$TEST_ROOT/active-allowed
 WORKING_DIR=$TEST_ROOT/active-allowed
 MCP_FULL_ACCESS=0
 MCP_ACCESS_PROFILE=developer
+MCP_RUN_AS_ROOT=0
+MCP_SERVICE_USER=
+MCP_CRITICAL_CONFIRMATIONS=1
 MCP_EXPOSURE_MODE=local
 MCP_PUBLIC_BASE_URL=
 MCP_AUTH_MODE=none
@@ -362,12 +506,50 @@ SERVICE_OUTPUT="$TEST_ROOT/service-unit.out"
     ./install-service.sh >"$SERVICE_OUTPUT" 2>&1
 )
 grep -Fq 'Environment="MCP_LAUNCH_MODE=persistent"' "$SERVICE_OUTPUT"
+grep -Fq 'Environment="MCP_CONFIG_SOURCE=file"' "$SERVICE_OUTPUT"
 grep -Fq 'LimitCORE=0' "$SERVICE_OUTPUT"
 grep -Fq 'LockPersonality=true' "$SERVICE_OUTPUT"
 grep -Fq 'RestrictRealtime=true' "$SERVICE_OUTPUT"
 grep -Fq 'SystemCallArchitectures=native' "$SERVICE_OUTPUT"
 ! grep -Fq 'MCP_AUTH_TOKEN=' "$SERVICE_OUTPUT"
 echo 'persistent_service_unit=OK'
+
+printf '\n== persistent root OAuth service dry-run ==\n'
+mkdir -p "$TEST_ROOT/root-service-repo"
+cp -a "$TEST_ROOT/repo/." "$TEST_ROOT/root-service-repo/"
+python3 - "$TEST_ROOT/root-service-repo/.env" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); updates={'MCP_RUN_AS_ROOT':'1','MCP_SERVICE_USER':'root','MCP_CRITICAL_CONFIRMATIONS':'0'}
+lines=p.read_text().splitlines(); out=[]; seen=set()
+for line in lines:
+    if line and not line.lstrip().startswith('#') and '=' in line:
+        key=line.split('=',1)[0].strip()
+        if key in updates:
+            out.append(f'{key}={updates[key]}'); seen.add(key); continue
+    out.append(line)
+for key,value in updates.items():
+    if key not in seen: out.append(f'{key}={value}')
+p.write_text('\n'.join(out).rstrip()+'\n'); p.chmod(0o600)
+PY
+ROOT_SERVICE_OUTPUT="$TEST_ROOT/root-service-unit.out"
+(
+  cd "$TEST_ROOT/root-service-repo"
+  env -i HOME="$HOME" USER="$(id -un)" \
+    PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    MCP_SETUP_ALREADY_DONE=1 MCP_SERVICE_NAME=mcp-root-dry-run.service \
+    MCP_SERVICE_DRY_RUN=1 ./install-service.sh >"$ROOT_SERVICE_OUTPUT" 2>&1
+)
+grep -Fq 'User=root' "$ROOT_SERVICE_OUTPUT"
+grep -Fq 'Group=root' "$ROOT_SERVICE_OUTPUT"
+grep -Fq 'Environment="MCP_CONFIG_SOURCE=file"' "$ROOT_SERVICE_OUTPUT"
+grep -Fq 'Environment="MCP_REPO_OWNER_UID=' "$ROOT_SERVICE_OUTPUT"
+grep -Fq 'Environment="MCP_REPO_OWNER_GID=' "$ROOT_SERVICE_OUTPUT"
+grep -Fq 'Environment="MCP_DESKTOP_UID=' "$ROOT_SERVICE_OUTPUT"
+grep -Fq 'Environment="MCP_DESKTOP_HOME=' "$ROOT_SERVICE_OUTPUT"
+! grep -Fq "$TOKEN" "$ROOT_SERVICE_OUTPUT"
+! grep -Fq "$PASSWORD" "$ROOT_SERVICE_OUTPUT"
+echo 'persistent_root_oauth_service=OK'
 
 printf '\n== insecure persistent mode is rejected ==\n'
 if (
@@ -394,6 +576,8 @@ if (
   MCP_SETUP_ACCESS_CHOICE=1 \
   MCP_SETUP_ALLOWED_PATHS="$TEST_ROOT/http-allowed" \
   MCP_SETUP_PROFILE_CHOICE=2 \
+  MCP_SETUP_PRIVILEGE_CHOICE=1 \
+  MCP_SETUP_CONFIRMATION_CHOICE=1 \
   MCP_SETUP_MODE_CHOICE=2 \
   MCP_SETUP_DIRECT_URL=198.51.100.10:43124 \
   MCP_SETUP_OPEN_FIREWALL=2 \
@@ -413,6 +597,8 @@ rm -rf "$TEST_ROOT/http-repo/.private" "$TEST_ROOT/http-repo/.runtime"
   MCP_SETUP_ACCESS_CHOICE=1 \
   MCP_SETUP_ALLOWED_PATHS="$TEST_ROOT/http-allowed" \
   MCP_SETUP_PROFILE_CHOICE=2 \
+  MCP_SETUP_PRIVILEGE_CHOICE=1 \
+  MCP_SETUP_CONFIRMATION_CHOICE=1 \
   MCP_SETUP_MODE_CHOICE=2 \
   MCP_SETUP_DIRECT_URL=198.51.100.10:43124 \
   MCP_SETUP_OPEN_FIREWALL=2 \

@@ -2,11 +2,16 @@
 
 Servidor MCP para administrar un equipo propio desde ChatGPT y otros clientes compatibles. Expone herramientas de archivos, comandos, procesos, servicios, Git, tmux, escritorio, captura de pantalla, cámara, audio y diagnóstico del sistema.
 
-La versión 4.1 agrega:
+La versión 4.2 agrega:
 
+- un panel de inicio con logo, versión, cantidad de herramientas, perfil, cuenta, confirmaciones y estado de actualización;
 - configuración inicial completa en **una sola terminal**;
 - perfiles de acceso que deciden qué herramientas verá ChatGPT;
 - 72 herramientas verificadas para archivos, red, paquetes, firewall, montajes, contenedores, escritorio y administración;
+- ejecución opcional como `root`, siempre mediante una aceptación de riesgo explícita;
+- confirmaciones críticas opcionales para quienes necesiten automatización total;
+- comprobación de actualizaciones en segundo plano, con aviso de color cuando hay una versión nueva;
+- arranque y detección de capacidades optimizados;
 - guardado automático del endpoint de ngrok;
 - OAuth 2.1 integrado para ChatGPT;
 - modo temporal o servicio persistente;
@@ -39,10 +44,12 @@ El asistente pregunta:
 
 1. qué carpetas puede administrar el MCP;
 2. qué perfil de herramientas se publicará;
-3. si se publicará mediante ngrok, una URL/IP propia o solamente en local;
-4. el authtoken y el endpoint de ngrok, cuando corresponda;
-5. si usará OAuth, token Bearer o ninguna autenticación;
-6. si se iniciará en modo temporal o persistente.
+3. si el proceso se ejecutará como usuario normal o como `root`;
+4. si las acciones críticas exigirán una confirmación adicional;
+5. si se publicará mediante ngrok, una URL/IP propia o solamente en local;
+6. el authtoken y el endpoint de ngrok, cuando corresponda;
+7. si usará OAuth, token Bearer o ninguna autenticación;
+8. si se iniciará en modo temporal o persistente.
 
 La configuración se conserva para los próximos inicios.
 
@@ -50,7 +57,7 @@ La configuración se conserva para los próximos inicios.
 
 | Archivo/directorio | Contenido | Git |
 |---|---|---|
-| `.env` | URL, puerto, rutas, perfil de herramientas y modos seleccionados | Ignorado |
+| `.env` | URL, puerto, rutas, perfil, cuenta del proceso, confirmaciones y modos seleccionados | Ignorado |
 | `.private/ngrok.yml` | Authtoken de ngrok | Ignorado, modo `0600` |
 | `.private/oauth-state.json` | Hash de contraseña, clientes y hashes de tokens OAuth | Ignorado, modo `0600` |
 | `.private/bearer-token.txt` | Token Bearer, sólo si se eligió ese modo | Ignorado, modo `0600` |
@@ -60,10 +67,12 @@ No copies secretos dentro del README, scripts, commits, capturas públicas ni me
 
 ## Perfiles de acceso
 
-El asistente separa dos decisiones diferentes:
+El asistente separa cuatro decisiones diferentes:
 
 - **Alcance de archivos:** únicamente las carpetas indicadas o todo lo permitido por el usuario del sistema.
 - **Perfil de herramientas:** cuáles de las 72 herramientas se anuncian a ChatGPT y cuáles se rechazan aunque un cliente intente invocarlas directamente.
+- **Cuenta de ejecución:** usuario normal o `root`. `root` puede superar las barreras de permisos del sistema.
+- **Confirmaciones críticas:** exigir o no las frases adicionales de seguridad antes de borrar, instalar paquetes, cambiar firewall/montajes, modificar contenedores o apagar el equipo.
 
 | Perfil | Herramientas visibles | Uso recomendado |
 |---|---:|---|
@@ -83,15 +92,59 @@ Podés consultar la política activa desde ChatGPT con `tool_policy_status` o lo
 
 > **Límite importante:** los perfiles son una barrera de herramientas, no una máquina virtual. `run_command`, control de teclado, tmux y algunas operaciones Git/Compose son capacidades amplias. Para una separación estricta, elegí `read_only` o un perfil `custom` sin `command_execution`, ejecutá el MCP con un usuario dedicado y restringí `ALLOWED_PATHS`.
 
-Las herramientas administrativas no elevan privilegios por sí solas. Funcionan como `root` o cuando el administrador local configuró `sudo` no interactivo; `control_capabilities` informa si ese acceso existe.
+### Usuario normal o root
 
-Para cambiar únicamente el perfil más adelante, sin volver a ingresar ngrok ni OAuth:
+El modo recomendado ejecuta el MCP con el propietario del repositorio. Las herramientas administrativas no elevan privilegios por sí solas; `control_capabilities` informa si el usuario tiene acceso real mediante `root` o `sudo` no interactivo.
+
+El asistente también permite elegir **root**. Para habilitarlo exige escribir exactamente `ACEPTO ROOT TOTAL`. En modo temporal, el launcher vuelve a iniciarse mediante `sudo`. En modo persistente, la unidad systemd utiliza `User=root`. Los archivos privados y logs generados por el proceso se devuelven al propietario del repositorio cuando es posible.
+
+Un MCP root puede leer secretos del sistema, instalar software, cambiar servicios, firewall y discos, o inutilizar el equipo. Para un servicio público persistente, el instalador exige OAuth sobre HTTPS por defecto.
+
+### Confirmaciones críticas
+
+Por defecto, las herramientas dedicadas de mayor riesgo exigen frases como `DELETE`, `APPLY PACKAGES`, `APPLY FIREWALL`, `APPLY MOUNT`, `APPLY CONTAINERS`, `REBOOT` o `POWEROFF`. El usuario puede desactivar esta capa escribiendo exactamente `ACEPTO SIN CONFIRMACIONES`.
+
+Al desactivarla, las herramientas dejan de exigir esos campos y pueden actuar en una sola llamada. Esto **no** elimina los permisos del sistema, OAuth ni las restricciones de carpetas. Tampoco controla las confirmaciones que la propia interfaz de ChatGPT pueda mostrar: el servidor conserva metadatos honestos sobre las operaciones destructivas.
+
+Para cambiar el perfil, la cuenta de ejecución o las confirmaciones sin volver a ingresar ngrok ni OAuth:
 
 ```bash
 ./mcpctl.sh permissions-set
 ```
 
-`./mcpctl.sh configure` continúa disponible para reconfigurar todo. Después de cambiar herramientas, volvé a escanear la app en ChatGPT.
+`./mcpctl.sh configure` continúa disponible para reconfigurar todo. Después de cambiar herramientas o confirmaciones, volvé a escanear la app en ChatGPT.
+
+## Panel de inicio y actualizaciones
+
+Cada inicio muestra un logo ASCII de **MCP-Server**, la versión instalada, la versión de Node.js, cuántas herramientas se publican, el perfil elegido, el alcance de archivos, la cuenta del proceso, el estado de las confirmaciones, la autenticación y el método de publicación.
+
+La comprobación de Git utiliza un caché de 15 minutos y se actualiza en segundo plano para no bloquear el inicio. Cuando `origin/main` contiene una revisión nueva aparece un aviso destacado en otro color. También se avisa si el árbol local tiene cambios o si el historial divergió.
+
+Comprobación manual:
+
+```bash
+./mcpctl.sh update-check
+```
+
+Ajustes locales opcionales:
+
+```text
+MCP_UPDATE_CHECK=1
+MCP_UPDATE_CHECK_TTL_SECONDS=900
+MCP_UPDATE_CHECK_TIMEOUT_MS=5000
+```
+
+El servidor se mantiene como código JavaScript ejecutado por Node.js. Compilarlo no aporta una mejora significativa para las tareas dominadas por disco, red, Git, procesos y herramientas externas; además dificultaría las actualizaciones y la compatibilidad entre distribuciones. Node.js compila en tiempo de ejecución las partes activas, y el panel indica expresamente el motor utilizado.
+
+## Rendimiento
+
+El inicio guarda una huella de las dependencias verificadas en `.runtime/dependencies.ready`. Mientras no cambien `install-deps.sh`, `package.json`, `package-lock.json`, la plataforma ni los ejecutables base, no repite la comprobación completa. Puede forzarse con:
+
+```bash
+MCP_FORCE_DEPENDENCY_CHECK=1 bash start-mcp.sh
+```
+
+La detección de programas ya no abre un shell por cada herramienta y el catálogo MCP se construye una sola vez por proceso. Esto reduce especialmente la demora de `control_capabilities`, el listado de herramientas y los reinicios sucesivos.
 
 ## Publicación del MCP
 
@@ -148,7 +201,7 @@ El servidor incluye un proveedor OAuth para la cuenta administradora local. Impl
 - hashes scrypt para la contraseña;
 - almacenamiento de códigos y tokens únicamente como hashes.
 
-En el asistente elegí OAuth, definí un usuario y una contraseña distinta de la contraseña del sistema. Cuando ChatGPT escanee las herramientas, se abrirá la página de autorización del propio MCP. Esa pantalla muestra el destino, el perfil elegido y la cantidad de herramientas publicadas; revisalos antes de autorizar.
+En el asistente elegí OAuth, definí un usuario y una contraseña distinta de la contraseña del sistema. Cuando ChatGPT escanee las herramientas, se abrirá la página de autorización del propio MCP. Esa pantalla muestra el destino, el perfil elegido, la cantidad de herramientas y alertas rojas si se habilitaron `root` o las confirmaciones desactivadas; revisalos antes de autorizar.
 
 El proveedor integrado está orientado a una instalación privada y de un solo administrador. Para publicar un servicio multiusuario, empresarial o de terceros, conviene usar un proveedor de identidad establecido y auditar su configuración por separado. El modo integrado anuncia DCR para que ChatGPT pueda registrar la conexión; no anuncia CIMD ni `private_key_jwt`.
 
@@ -265,7 +318,8 @@ Sólo agregues servidores que controles y revisá las herramientas antes de habi
 ./mcpctl.sh configure       # Reconfigurar carpetas, perfil, ngrok y autenticación
 ./mcpctl.sh permissions     # Mostrar perfil y herramientas permitidas/bloqueadas
 ./mcpctl.sh permissions --tools  # Mostrar las listas completas
-./mcpctl.sh permissions-set # Cambiar sólo el perfil, sin reingresar ngrok/OAuth
+./mcpctl.sh permissions-set # Cambiar perfil, root y confirmaciones sin tocar ngrok/OAuth
+./mcpctl.sh update-check    # Comprobar ahora si hay una versión nueva
 ./mcpctl.sh temporary       # Iniciar en primer plano
 ./mcpctl.sh persistent      # Instalar/iniciar servicio persistente
 ./mcpctl.sh start           # Iniciar servicio instalado
@@ -285,7 +339,7 @@ git pull
 bash start-mcp.sh
 ```
 
-Las instalaciones anteriores se migran sin borrar su `.env`. Para no quitar capacidades de manera inesperada, una instalación 4.0 o anterior sin perfil explícito migra inicialmente a `full`; luego podés reducirla con `./mcpctl.sh permissions-set`. Si una instalación antigua estaba publicada sin autenticación, se conserva para evitar cortar el acceso, pero se muestra una advertencia. Para activar OAuth:
+Las instalaciones anteriores se migran sin borrar su `.env`. Para no quitar capacidades de manera inesperada, una instalación 4.1 o anterior sin perfil explícito migra inicialmente a `full`; luego podés reducirla con `./mcpctl.sh permissions-set`. Si una instalación antigua estaba publicada sin autenticación, se conserva para evitar cortar el acceso, pero se muestra una advertencia. Para activar OAuth:
 
 ```bash
 ./mcpctl.sh configure
@@ -301,7 +355,7 @@ El servidor expone hasta **72 herramientas**, según el perfil seleccionado:
 - creación y extracción segura de archivos TAR/ZIP;
 - ejecución de comandos y procesos;
 - estado del sistema, hardware, GPU, red, usuarios, servicios y journal;
-- paquetes del sistema, firewall, montajes y energía con confirmaciones explícitas y modo de simulación;
+- paquetes del sistema, firewall, montajes y energía con confirmaciones configurables y modo de simulación;
 - Git y worktrees;
 - sesiones tmux;
 - solicitudes HTTP, comprobación de puertos y descargas atómicas;
@@ -310,7 +364,7 @@ El servidor expone hasta **72 herramientas**, según el perfil seleccionado:
 - cámara y audio;
 - diagnóstico del propio MCP, política de acceso y actividad legible.
 
-Las operaciones especialmente sensibles exigen frases de confirmación dentro de la llamada y varias admiten `dryRun` para mostrar la orden sin ejecutarla. La extracción de archivos rechaza rutas que escapan del destino, enlaces y dispositivos; las rutas permitidas también se validan contra escapes por enlaces simbólicos.
+Las operaciones especialmente sensibles exigen frases de confirmación dentro de la llamada mientras esa capa esté activa, y varias admiten `dryRun` para mostrar la orden sin ejecutarla. La extracción de archivos rechaza rutas que escapan del destino, enlaces y dispositivos; las rutas permitidas también se validan contra escapes por enlaces simbólicos.
 
 No todas las capacidades existen en todos los equipos. `control_capabilities` indica qué programas, escritorio y privilegios están realmente disponibles. Las herramientas se ejecutan con los permisos del usuario del proceso MCP; usar `root` amplía drásticamente el impacto de una credencial comprometida, por lo que se recomienda un usuario dedicado y OAuth.
 
@@ -374,7 +428,7 @@ npm test
 npm run selftest
 ```
 
-Las pruebas incluyen sintaxis, los cinco perfiles de acceso, filtrado y rechazo directo de herramientas, las 72 herramientas, seguridad de rutas y archivos comprimidos, descargas/HTTP, operaciones administrativas en `dryRun`, modos de autenticación, flujo OAuth completo, PKCE, audiencia del recurso, rotación y detección de reutilización de refresh tokens, migración desde 4.0, configuración inicial con ngrok simulado, unidad systemd, supervisor y logs legibles.
+Las pruebas incluyen sintaxis, panel de inicio y caché de actualización, los cinco perfiles de acceso, modos usuario/root, confirmaciones activas o desactivadas, filtrado y rechazo directo de herramientas, las 72 herramientas, seguridad de rutas y archivos comprimidos, descargas/HTTP, operaciones administrativas en `dryRun`, modos de autenticación, flujo OAuth completo, alertas de riesgo, PKCE, audiencia del recurso, rotación y detección de reutilización de refresh tokens, migración desde versiones anteriores, configuración inicial con ngrok simulado, unidad systemd, supervisor, propiedad de archivos privados y logs legibles.
 
 ## Licencia
 

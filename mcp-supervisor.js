@@ -7,11 +7,15 @@ const http = require('http');
 const { spawn } = require('child_process');
 const { parseDotEnv, redactText } = require('./runtime-diagnostics');
 const { humanEvent } = require('./human-log');
+const { createAccessPolicy, TOOL_REQUIREMENTS } = require('./access-policy');
+const PACKAGE_VERSION = require('./package.json').version;
+const { applyPrivateOwnership, ensurePrivateDirectory } = require('./private-owner');
 
 const ROOT = __dirname;
 const fileEnv = parseDotEnv(path.join(ROOT, '.env'));
+const FILE_CONFIG_PRIORITY = String(process.env.MCP_CONFIG_SOURCE || '').toLowerCase() === 'file';
 for (const [key, value] of Object.entries(fileEnv)) {
-  if (process.env[key] === undefined) process.env[key] = value;
+  if (FILE_CONFIG_PRIORITY || process.env[key] === undefined) process.env[key] = value;
 }
 
 hydrateDesktopEnvironment();
@@ -36,15 +40,26 @@ const HEALTH_START_TIMEOUT_MS = positiveInt(process.env.MCP_HEALTH_START_TIMEOUT
 const NGROK_BIN = process.env.NGROK_BIN || 'ngrok';
 const AUTH_MODE = String(process.env.MCP_AUTH_MODE || (process.env.MCP_AUTH_TOKEN ? 'bearer' : 'none')).toLowerCase();
 const ACCESS_PROFILE = String(process.env.MCP_ACCESS_PROFILE || 'developer').toLowerCase();
+const ACCESS_POLICY = createAccessPolicy(process.env, Object.keys(TOOL_REQUIREMENTS)).summary();
+const RUN_AS_ROOT = String(process.env.MCP_RUN_AS_ROOT || '0') === '1';
+const CRITICAL_CONFIRMATIONS = ACCESS_POLICY.criticalConfirmations;
 const CONFIGURED_NGROK_URL = normalizeNgrokUrl(process.env.NGROK_URL || process.env.NGROK_DOMAIN);
+const ACTUAL_UID = typeof process.getuid === 'function' ? process.getuid() : null;
+if (RUN_AS_ROOT && process.platform !== 'win32' && ACTUAL_UID !== 0 && process.env.MCP_TEST_ALLOW_ROOT_FLAG !== '1') {
+  throw new Error('MCP_RUN_AS_ROOT=1, pero el supervisor no se inició con uid 0. Usá bash start-mcp.sh.');
+}
 
-fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 });
-try { fs.chmodSync(RUNTIME_DIR, 0o700); } catch (_) {}
+ensurePrivateDirectory(RUNTIME_DIR, 0o700);
 rotateLog(SERVER_LOG_PATH);
 rotateLog(NGROK_LOG_PATH);
 removeFile(PUBLIC_URL_PATH);
 removeFile(CHATGPT_URL_PATH);
 writeAtomic(PID_PATH, `${process.pid}\n`);
+for (const filePath of [SERVER_LOG_PATH, NGROK_LOG_PATH]) {
+  const fd = fs.openSync(filePath, 'a', 0o600);
+  fs.closeSync(fd);
+  applyPrivateOwnership(filePath, 0o600);
+}
 
 const serverLog = fs.createWriteStream(SERVER_LOG_PATH, { flags: 'a', mode: 0o600 });
 const ngrokLog = fs.createWriteStream(NGROK_LOG_PATH, { flags: 'a', mode: 0o600 });
@@ -53,8 +68,14 @@ const status = {
   state: 'starting',
   mode: MODE,
   launchMode: LAUNCH_MODE,
+  version: PACKAGE_VERSION,
   authMode: AUTH_MODE,
   accessProfile: ACCESS_PROFILE,
+  toolCount: ACCESS_POLICY.allowedToolCount,
+  totalToolCount: Object.keys(TOOL_REQUIREMENTS).length,
+  runAsRoot: RUN_AS_ROOT,
+  actualUid: typeof process.getuid === 'function' ? process.getuid() : null,
+  criticalConfirmations: CRITICAL_CONFIRMATIONS,
   host: HOST,
   port: PORT,
   supervisorPid: process.pid,
@@ -91,11 +112,13 @@ let announcedHealthy = false;
 const startupDeadline = Date.now() + HEALTH_START_TIMEOUT_MS;
 
 function hydrateDesktopEnvironment() {
-  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
-  const home = process.env.HOME || '';
+  const processUid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const configuredUid = Number(process.env.MCP_DESKTOP_UID);
+  const desktopUid = Number.isInteger(configuredUid) && configuredUid >= 0 ? configuredUid : processUid;
+  const desktopHome = process.env.MCP_DESKTOP_HOME || process.env.HOME || '';
   if (!process.env.DISPLAY) process.env.DISPLAY = ':0';
-  if (!process.env.XDG_RUNTIME_DIR && uid !== null) {
-    const candidate = `/run/user/${uid}`;
+  if (!process.env.XDG_RUNTIME_DIR && desktopUid !== null) {
+    const candidate = `/run/user/${desktopUid}`;
     if (fs.existsSync(candidate)) process.env.XDG_RUNTIME_DIR = candidate;
   }
   if (!process.env.DBUS_SESSION_BUS_ADDRESS && process.env.XDG_RUNTIME_DIR) {
@@ -104,7 +127,7 @@ function hydrateDesktopEnvironment() {
   }
   if (!process.env.XAUTHORITY) {
     const candidates = [
-      home ? path.join(home, '.Xauthority') : '',
+      desktopHome ? path.join(desktopHome, '.Xauthority') : '',
       process.env.XDG_RUNTIME_DIR ? path.join(process.env.XDG_RUNTIME_DIR, 'gdm', 'Xauthority') : ''
     ].filter(Boolean);
     const found = candidates.find((candidate) => fs.existsSync(candidate));
@@ -134,14 +157,16 @@ function rotateLog(filePath) {
     const previous = `${filePath}.1`;
     removeFile(previous);
     fs.renameSync(filePath, previous);
+    applyPrivateOwnership(previous, 0o600);
   } catch (_) {}
 }
 
 function writeAtomic(filePath, content) {
   const temporary = `${filePath}.${process.pid}.tmp`;
   fs.writeFileSync(temporary, content, { encoding: 'utf8', mode: 0o600 });
+  applyPrivateOwnership(temporary, 0o600);
   fs.renameSync(temporary, filePath);
-  try { fs.chmodSync(filePath, 0o600); } catch (_) {}
+  applyPrivateOwnership(filePath, 0o600);
 }
 
 function updateState() {
@@ -305,8 +330,9 @@ function persistDetectedNgrokUrl(url) {
     }
     const temporary = `${envPath}.${process.pid}.tmp`;
     fs.writeFileSync(temporary, `${output.join('\n').replace(/\n+$/, '')}\n`, { encoding: 'utf8', mode: 0o600 });
+    applyPrivateOwnership(temporary, 0o600);
     fs.renameSync(temporary, envPath);
-    try { fs.chmodSync(envPath, 0o600); } catch (_) {}
+    applyPrivateOwnership(envPath, 0o600);
     humanEvent('CONFIGURACION', `La URL detectada de ngrok quedó guardada para próximos inicios: ${value}`);
   } catch (error) {
     log(`No se pudo guardar automáticamente la URL de ngrok: ${error.message}`, 'WARN');
@@ -397,7 +423,7 @@ async function checkHealth() {
   if (status.serverHealthy) {
     if (!announcedHealthy) {
       announcedHealthy = true;
-      log(`Servidor MCP local listo. Autenticación: ${AUTH_MODE}.`);
+      log(`Servidor MCP v${PACKAGE_VERSION} listo con ${ACCESS_POLICY.allowedToolCount} de ${Object.keys(TOOL_REQUIREMENTS).length} herramientas. Perfil: ${ACCESS_PROFILE}; autenticación: ${AUTH_MODE}; ejecución: ${typeof process.getuid === 'function' && process.getuid() === 0 ? 'root' : 'usuario normal'}; confirmaciones críticas: ${CRITICAL_CONFIRMATIONS ? 'activadas' : 'desactivadas'}.`);
     }
     if (MODE === 'ngrok' && !ngrokChild && !ngrokRestartTimer) spawnNgrok();
   } else if (Date.now() >= startupDeadline) {
@@ -500,7 +526,7 @@ process.on('SIGHUP', () => shutdown(0, 'SIGHUP'));
 process.on('uncaughtException', (error) => shutdown(1, `uncaughtException: ${error.stack || error.message}`));
 process.on('unhandledRejection', (error) => shutdown(1, `unhandledRejection: ${error && (error.stack || error.message) || error}`));
 
-log(`Administrador MCP iniciado en modo ${LAUNCH_MODE === 'persistent' ? 'persistente' : 'temporal'}, exposición ${MODE} y autenticación ${AUTH_MODE}.`);
+log(`Administrador MCP v${PACKAGE_VERSION} iniciado en modo ${LAUNCH_MODE === 'persistent' ? 'persistente' : 'temporal'}, exposición ${MODE}, autenticación ${AUTH_MODE}, perfil ${ACCESS_PROFILE}, ${ACCESS_POLICY.allowedToolCount} herramientas, ${RUN_AS_ROOT ? 'root solicitado' : 'usuario normal'} y confirmaciones ${CRITICAL_CONFIRMATIONS ? 'activadas' : 'desactivadas'}.`);
 spawnServer();
 configureExposure();
 healthTimer = setInterval(() => { checkHealth().catch((error) => log(`health check: ${error.message}`, 'WARN')); }, 2000);

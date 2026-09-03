@@ -9,6 +9,9 @@ const { spawn } = require('child_process');
 const DEFAULT_TIMEOUT_MS = 120000;
 const DEFAULT_OUTPUT_LIMIT = 4 * 1024 * 1024;
 const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
+const CRITICAL_CONFIRMATIONS_REQUIRED = !['0', 'false', 'no', 'off'].includes(
+  String(process.env.MCP_CRITICAL_CONFIRMATIONS || '1').trim().toLowerCase()
+);
 
 function clampInt(value, fallback, min, max) {
   const number = Number(value);
@@ -78,12 +81,27 @@ async function requireSuccess(command, args = [], options = {}) {
 }
 
 async function commandExists(command) {
-  try {
-    const result = await execCommand('sh', ['-c', 'command -v -- "$1" >/dev/null 2>&1', '_', command], { timeoutMs: 5000 });
-    return result.exit_code === 0;
-  } catch (_) {
-    return false;
+  const raw = String(command || '').trim();
+  if (!raw || raw.includes('\0')) return false;
+  const extensions = process.platform === 'win32'
+    ? String(process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
+    : [''];
+  const names = path.extname(raw) || process.platform !== 'win32'
+    ? [raw]
+    : extensions.map((extension) => `${raw}${extension}`);
+  const directories = raw.includes('/') || raw.includes('\\')
+    ? ['']
+    : String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  for (const directory of directories) {
+    for (const name of names) {
+      const candidate = directory ? path.join(directory, name) : name;
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        if (fs.statSync(candidate).isFile()) return true;
+      } catch (_) {}
+    }
   }
+  return false;
 }
 
 async function privilegedCommand(command, args, options = {}) {
@@ -164,9 +182,14 @@ function validateServiceNames(services) {
 }
 
 function requireConfirmation(actual, expected, action) {
+  if (!CRITICAL_CONFIRMATIONS_REQUIRED) return;
   if (String(actual || '') !== expected) {
     throw new Error(`${action} requiere confirm="${expected}".`);
   }
+}
+
+function confirmationRequiredFields(fields = []) {
+  return CRITICAL_CONFIRMATIONS_REQUIRED ? [...fields, 'confirm'] : fields;
 }
 
 function hashFile(filePath, algorithm) {
@@ -347,11 +370,11 @@ function createExtendedTools({ resolvePath, buildToolMetadata, textResult }) {
       destination: { type: 'string' },
       overwrite: { type: 'boolean', description: 'Default false.' }
     }, ['source', 'destination'], rw),
-    makeTool(buildToolMetadata, 'file_delete', 'Delete File or Directory', 'Deletes a file or directory. Requires an explicit confirmation string.', {
+    makeTool(buildToolMetadata, 'file_delete', 'Delete File or Directory', CRITICAL_CONFIRMATIONS_REQUIRED ? 'Deletes a file or directory. Requires an explicit confirmation string.' : 'Deletes a file or directory. Server-side confirmation phrases are disabled by local configuration.', {
       path: { type: 'string' },
       recursive: { type: 'boolean', description: 'Required for non-empty directories.' },
-      confirm: { type: 'string', description: 'Must be exactly DELETE.' }
-    }, ['path', 'confirm'], rw),
+      confirm: { type: 'string', description: CRITICAL_CONFIRMATIONS_REQUIRED ? 'Must be exactly DELETE.' : 'Optional because critical confirmations are disabled.' }
+    }, confirmationRequiredFields(['path']), rw),
     makeTool(buildToolMetadata, 'archive_create', 'Create Archive', 'Creates tar, tar.gz or zip archives from an allowed file or directory.', {
       source: { type: 'string' },
       destination: { type: 'string' },
@@ -387,46 +410,46 @@ function createExtendedTools({ resolvePath, buildToolMetadata, textResult }) {
       packages: { type: 'array', items: { type: 'string' }, description: 'Optional package names.' },
       updates: { type: 'boolean', description: 'Include pending updates. Default false.' }
     }, [], ro),
-    makeTool(buildToolMetadata, 'package_action', 'Package Manager Action', 'Refreshes, installs, removes or upgrades system packages. Requires explicit confirmation.', {
+    makeTool(buildToolMetadata, 'package_action', 'Package Manager Action', CRITICAL_CONFIRMATIONS_REQUIRED ? 'Refreshes, installs, removes or upgrades system packages. Requires explicit confirmation.' : 'Refreshes, installs, removes or upgrades system packages without an additional server-side confirmation phrase.', {
       action: { type: 'string', enum: ['refresh', 'install', 'remove', 'upgrade'] },
       packages: { type: 'array', items: { type: 'string' } },
-      confirm: { type: 'string', description: 'Must be exactly APPLY PACKAGES.' },
+      confirm: { type: 'string', description: CRITICAL_CONFIRMATIONS_REQUIRED ? 'Must be exactly APPLY PACKAGES.' : 'Optional because critical confirmations are disabled.' },
       dryRun: { type: 'boolean', description: 'Return the command without executing it.' }
-    }, ['action', 'confirm'], rw),
+    }, confirmationRequiredFields(['action']), rw),
     makeTool(buildToolMetadata, 'firewall_status', 'Firewall Status', 'Reads UFW, firewalld or nftables status without changing rules.', {}, [], ro),
-    makeTool(buildToolMetadata, 'firewall_action', 'Firewall Action', 'Allows or denies a UFW/firewalld rule, reloads, enables or disables the firewall. Requires explicit confirmation.', {
+    makeTool(buildToolMetadata, 'firewall_action', 'Firewall Action', CRITICAL_CONFIRMATIONS_REQUIRED ? 'Allows or denies a UFW/firewalld rule, reloads, enables or disables the firewall. Requires explicit confirmation.' : 'Allows or denies a UFW/firewalld rule, reloads, enables or disables the firewall without an additional server-side confirmation phrase.', {
       action: { type: 'string', enum: ['allow', 'deny', 'reload', 'enable', 'disable'] },
       rule: { type: 'string', description: 'For example 9090/tcp. Required for allow/deny.' },
-      confirm: { type: 'string', description: 'Must be exactly APPLY FIREWALL.' },
+      confirm: { type: 'string', description: CRITICAL_CONFIRMATIONS_REQUIRED ? 'Must be exactly APPLY FIREWALL.' : 'Optional because critical confirmations are disabled.' },
       dryRun: { type: 'boolean' }
-    }, ['action', 'confirm'], rw),
+    }, confirmationRequiredFields(['action']), rw),
     makeTool(buildToolMetadata, 'mount_status', 'Mount Status', 'Returns block devices and current mount points.', {}, [], ro),
-    makeTool(buildToolMetadata, 'mount_action', 'Mount Action', 'Mounts a source at an allowed target or unmounts an allowed target. Requires explicit confirmation.', {
+    makeTool(buildToolMetadata, 'mount_action', 'Mount Action', CRITICAL_CONFIRMATIONS_REQUIRED ? 'Mounts a source at an allowed target or unmounts an allowed target. Requires explicit confirmation.' : 'Mounts or unmounts allowed targets without an additional server-side confirmation phrase.', {
       action: { type: 'string', enum: ['mount', 'unmount'] },
       source: { type: 'string', description: 'Device/source for mount.' },
       target: { type: 'string', description: 'Mount point under allowed paths.' },
       options: { type: 'array', items: { type: 'string' }, description: 'Mount options such as rw,noexec.' },
-      confirm: { type: 'string', description: 'Must be exactly APPLY MOUNT.' },
+      confirm: { type: 'string', description: CRITICAL_CONFIRMATIONS_REQUIRED ? 'Must be exactly APPLY MOUNT.' : 'Optional because critical confirmations are disabled.' },
       dryRun: { type: 'boolean' }
-    }, ['action', 'target', 'confirm'], rw),
+    }, confirmationRequiredFields(['action', 'target']), rw),
     makeTool(buildToolMetadata, 'user_accounts', 'User Accounts', 'Lists local users and privileged group memberships without reading password hashes.', {
       includeSystem: { type: 'boolean', description: 'Include system accounts below UID 1000. Default false.' }
     }, [], ro),
     makeTool(buildToolMetadata, 'container_status', 'Container Runtime Status', 'Reports Docker/Podman availability, service state and running containers.', {}, [], ro),
-    makeTool(buildToolMetadata, 'container_compose', 'Container Compose Action', 'Runs common Docker/Podman Compose project actions. Mutating actions require explicit confirmation.', {
+    makeTool(buildToolMetadata, 'container_compose', 'Container Compose Action', CRITICAL_CONFIRMATIONS_REQUIRED ? 'Runs common Docker/Podman Compose project actions. Mutating actions require explicit confirmation.' : 'Runs common Docker/Podman Compose project actions without an additional server-side confirmation phrase.', {
       project: { type: 'string', description: 'Project directory under allowed paths.' },
       action: { type: 'string', enum: ['ps', 'logs', 'config', 'up', 'down', 'restart', 'build', 'pull'] },
       services: { type: 'array', items: { type: 'string' } },
       lines: { type: 'number', description: 'Log lines, default 200.' },
-      confirm: { type: 'string', description: 'For mutating actions, must be exactly APPLY CONTAINERS.' },
+      confirm: { type: 'string', description: CRITICAL_CONFIRMATIONS_REQUIRED ? 'For mutating actions, must be exactly APPLY CONTAINERS.' : 'Optional because critical confirmations are disabled.' },
       dryRun: { type: 'boolean' }
     }, ['project', 'action'], rw),
-    makeTool(buildToolMetadata, 'power_action', 'Power Action', 'Schedules a reboot or poweroff after a short delay. Requires confirmation matching the action.', {
+    makeTool(buildToolMetadata, 'power_action', 'Power Action', CRITICAL_CONFIRMATIONS_REQUIRED ? 'Schedules a reboot or poweroff after a short delay. Requires confirmation matching the action.' : 'Schedules a reboot or poweroff after a short delay without an additional server-side confirmation phrase.', {
       action: { type: 'string', enum: ['reboot', 'poweroff'] },
       delaySeconds: { type: 'number', description: 'Default 10, minimum 5, maximum 3600.' },
-      confirm: { type: 'string', description: 'Must be exactly REBOOT or POWEROFF.' },
+      confirm: { type: 'string', description: CRITICAL_CONFIRMATIONS_REQUIRED ? 'Must be exactly REBOOT or POWEROFF.' : 'Optional because critical confirmations are disabled.' },
       dryRun: { type: 'boolean' }
-    }, ['action', 'confirm'], rw)
+    }, confirmationRequiredFields(['action']), rw)
   ];
 
   async function callTool(name, args = {}) {

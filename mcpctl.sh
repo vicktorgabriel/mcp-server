@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 cd "$(dirname "$0")"
 export PATH="$HOME/.local/bin:$PATH"
+export MCP_CONFIG_SOURCE=file
 SERVICE="${MCP_SERVICE_NAME:-mcp-local.service}"
 
 root_run() {
@@ -43,7 +44,8 @@ Uso: ./mcpctl.sh COMANDO
   chatgpt         Guía paso a paso para agregarlo en ChatGPT
   configure       Reabre el asistente de ngrok, URL, acceso y autenticación
   permissions     Muestra el perfil y las herramientas permitidas/bloqueadas
-  permissions-set Cambia sólo el perfil, sin volver a pedir ngrok/OAuth
+  permissions-set Cambia perfil, root y confirmaciones sin tocar ngrok/OAuth
+  update-check    Comprueba ahora si el repositorio tiene una actualización
   temporary       Inicia en primer plano; cerrar terminal detiene todo
   persistent      Instala/inicia el servicio persistente
   start           Inicia el servicio instalado
@@ -72,6 +74,9 @@ case "$COMMAND" in
   chatgpt)
     node chatgpt-guide.js
     ;;
+  update-check|updates|version-check)
+    node startup-banner.js --check-update --force --notify
+    ;;
   permissions|access)
     node access-policy-cli.js "${@:2}"
     ;;
@@ -81,23 +86,54 @@ case "$COMMAND" in
       echo '[ERROR] Volvé a su terminal, presioná Ctrl+C y ejecutá nuevamente este comando.' >&2
       exit 1
     fi
-    RESTART_AFTER=0
-    if service_exists && systemctl is-active --quiet "$SERVICE"; then
-      echo '[INFO] Deteniendo el servicio persistente mientras se cambia el perfil.'
-      root_run systemctl stop "$SERVICE"
-      RESTART_AFTER=1
+    [ -f .env ] || { echo '[ERROR] No existe .env; ejecutá primero bash start-mcp.sh.' >&2; exit 1; }
+    CONFIG_BACKUP="$(mktemp)"
+    chmod 600 "$CONFIG_BACKUP"
+    cp --preserve=mode .env "$CONFIG_BACKUP"
+    trap 'rm -f "$CONFIG_BACKUP"' EXIT
+    SERVICE_PRESENT=0
+    SERVICE_WAS_ACTIVE=0
+    SERVICE_WAS_ENABLED=0
+    if service_exists; then
+      SERVICE_PRESENT=1
+      systemctl is-active --quiet "$SERVICE" && SERVICE_WAS_ACTIVE=1 || true
+      systemctl is-enabled --quiet "$SERVICE" && SERVICE_WAS_ENABLED=1 || true
+      if [ "$SERVICE_WAS_ACTIVE" = '1' ]; then
+        echo '[INFO] Deteniendo el servicio persistente mientras se cambia el acceso.'
+        root_run systemctl stop "$SERVICE"
+      fi
     fi
     if ! ./configure-mcp.sh --access-only; then
-      if [ "$RESTART_AFTER" = '1' ]; then
+      cp --preserve=mode "$CONFIG_BACKUP" .env
+      if [ "$SERVICE_WAS_ACTIVE" = '1' ]; then
         root_run systemctl start "$SERVICE" || true
         echo '[AVISO] La configuración fue cancelada; se restauró el servicio anterior.' >&2
       fi
       exit 1
     fi
-    if [ "$RESTART_AFTER" = '1' ]; then
-      root_run systemctl start "$SERVICE"
-      echo '[OK] Servicio reiniciado con el nuevo perfil.'
+    if [ "$SERVICE_PRESENT" = '1' ]; then
+      if ! MCP_SETUP_ALREADY_DONE=1 MCP_SERVICE_INSTALL_ONLY=1 ./install-service.sh; then
+        echo '[ERROR] La unidad persistente no acepta la nueva configuración; restaurando la anterior.' >&2
+        cp --preserve=mode "$CONFIG_BACKUP" .env
+        MCP_SETUP_ALREADY_DONE=1 MCP_SERVICE_INSTALL_ONLY=1 ./install-service.sh >/dev/null 2>&1 || true
+        if [ "$SERVICE_WAS_ENABLED" = '1' ]; then root_run systemctl enable "$SERVICE" >/dev/null 2>&1 || true; fi
+        if [ "$SERVICE_WAS_ACTIVE" = '1' ]; then root_run systemctl start "$SERVICE" >/dev/null 2>&1 || true; fi
+        exit 1
+      fi
+      if [ "$SERVICE_WAS_ENABLED" = '1' ]; then
+        root_run systemctl enable "$SERVICE" >/dev/null
+      else
+        root_run systemctl disable "$SERVICE" >/dev/null 2>&1 || true
+      fi
+      if [ "$SERVICE_WAS_ACTIVE" = '1' ]; then
+        root_run systemctl start "$SERVICE"
+        echo '[OK] Servicio reiniciado con el nuevo perfil, cuenta y confirmaciones.'
+      else
+        echo '[OK] Unidad persistente actualizada; permanece detenida.'
+      fi
     fi
+    rm -f "$CONFIG_BACKUP"
+    trap - EXIT
     ;;
   configure)
     if service_exists && systemctl is-active --quiet "$SERVICE"; then

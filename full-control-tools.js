@@ -101,12 +101,27 @@ async function requireSuccess(command, args = [], options = {}) {
 }
 
 async function commandExists(command) {
-  try {
-    const result = await execCommand('bash', ['-lc', `command -v -- "$1" >/dev/null 2>&1`, '_', command], { timeoutMs: 5000 });
-    return result.exit_code === 0;
-  } catch (_) {
-    return false;
+  const raw = String(command || '').trim();
+  if (!raw || raw.includes('\0')) return false;
+  const extensions = process.platform === 'win32'
+    ? String(process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
+    : [''];
+  const names = path.extname(raw) || process.platform !== 'win32'
+    ? [raw]
+    : extensions.map((extension) => `${raw}${extension}`);
+  const directories = raw.includes('/') || raw.includes('\\')
+    ? ['']
+    : String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  for (const directory of directories) {
+    for (const name of names) {
+      const candidate = directory ? path.join(directory, name) : name;
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        if (fs.statSync(candidate).isFile()) return true;
+      } catch (_) {}
+    }
   }
+  return false;
 }
 
 function imageMime(filePath) {
@@ -327,16 +342,15 @@ function createFullControl({ resolvePath, buildToolMetadata, textResult }) {
   ];
 
   async function shellBundle(commands) {
-    const outputs = {};
-    for (const [key, command, args] of commands) {
+    const entries = await Promise.all(commands.map(async ([key, command, args]) => {
       try {
         const result = await execCommand(command, args, { timeoutMs: 15000 });
-        outputs[key] = { exit_code: result.exit_code, stdout: result.stdout.trim(), stderr: result.stderr.trim() };
+        return [key, { exit_code: result.exit_code, stdout: result.stdout.trim(), stderr: result.stderr.trim() }];
       } catch (error) {
-        outputs[key] = { error: error.message };
+        return [key, { error: error.message }];
       }
-    }
-    return outputs;
+    }));
+    return Object.fromEntries(entries);
   }
 
   function resolvedDirectory(userPath) {

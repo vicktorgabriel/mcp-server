@@ -17,6 +17,22 @@ err() { printf '[ERROR] %s\n' "$*" >&2; }
 
 cleanup_pids=()
 DIRECT_FIREWALL_REQUESTED=0
+restore_private_owner() {
+  local uid gid owner
+  [ "$(id -u)" -eq 0 ] || return 0
+  uid="${MCP_REPO_OWNER_UID:-}"
+  gid="${MCP_REPO_OWNER_GID:-}"
+  if ! [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]]; then
+    owner="${SUDO_USER:-$(stat -c '%U' "$ROOT_DIR" 2>/dev/null || echo root)}"
+    id "$owner" >/dev/null 2>&1 || return 0
+    uid="$(id -u "$owner")"; gid="$(id -g "$owner")"
+  fi
+  [ "$uid" != '0' ] || return 0
+  [ ! -e "$ENV_FILE" ] || chown -h "$uid:$gid" "$ENV_FILE" 2>/dev/null || true
+  for directory in "$PRIVATE_DIR" "$ROOT_DIR/.runtime"; do
+    [ ! -e "$directory" ] || chown -R -h "$uid:$gid" "$directory" 2>/dev/null || true
+  done
+}
 cleanup() {
   local pid
   for pid in "${cleanup_pids[@]:-}"; do
@@ -24,7 +40,7 @@ cleanup() {
     wait "$pid" 2>/dev/null || true
   done
 }
-trap cleanup EXIT INT TERM
+trap 'cleanup; restore_private_owner' EXIT INT TERM
 
 ensure_template() {
   if [ ! -f "$ENV_FILE" ]; then
@@ -35,10 +51,21 @@ ensure_template() {
 }
 
 read_env() {
-  node - "$1" <<'NODE'
-const { parseDotEnv } = require('./runtime-diagnostics');
-process.stdout.write(String(parseDotEnv()[process.argv[2]] || ''));
-NODE
+  local key="$1" line value
+  if [ -f "$ENV_FILE" ]; then
+    line="$(grep -m1 -E "^${key}=" "$ENV_FILE" 2>/dev/null || true)"
+    if [ -n "$line" ]; then
+      value="${line#*=}"
+      if [[ "$value" == \"*\" && "$value" == *\" ]] || [[ "$value" == \'*\' && "$value" == *\' ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+      printf '%s' "$value"
+      return 0
+    fi
+  fi
+  if value="$(printenv "$key" 2>/dev/null)"; then
+    printf '%s' "$value"
+  fi
 }
 
 set_env() {
@@ -545,16 +572,102 @@ NODE
   ACCESS_PROFILE_RESULT="$profile"
 }
 
+configure_privilege_mode() {
+  local choice confirm default_choice='1' repo_owner
+  [ "$(read_env MCP_RUN_AS_ROOT)" = '1' ] && default_choice='2'
+  repo_owner="$(stat -c '%U' "$ROOT_DIR" 2>/dev/null || id -un)"
+
+  line
+  echo ' CUENTA DEL SISTEMA'
+  line
+  echo '  1) USUARIO NORMAL / DUEÑO DEL REPOSITORIO (RECOMENDADO)'
+  echo "     El MCP se ejecuta como ${repo_owner:-el usuario actual} y respeta sus permisos del sistema."
+  echo
+  echo '  2) ROOT (RIESGO MUY ALTO)'
+  echo '     Puede leer y modificar archivos del sistema, paquetes, servicios, firewall y discos.'
+  echo '     Una credencial OAuth robada o una instrucción equivocada puede comprometer todo el equipo.'
+  echo '     Para un endpoint público persistente se exigirá OAuth + HTTPS salvo anulación experta.'
+  echo
+  choice="$(prompt_choice MCP_SETUP_PRIVILEGE_CHOICE 'Cuenta de ejecución' "$default_choice")"
+  case "$choice" in
+    1|user|usuario|normal)
+      set_env 'MCP_RUN_AS_ROOT=0' 'MCP_SERVICE_USER='
+      PRIVILEGE_RESULT='usuario normal'
+      ;;
+    2|root|ROOT)
+      if [ "$INTERACTIVE" = '1' ]; then
+        echo
+        warn 'ROOT elimina la barrera de permisos del sistema. Usalo sólo en equipos propios y con OAuth.'
+        read -r -p 'Escribí ACEPTO ROOT TOTAL para habilitarlo: ' confirm
+        [ "$confirm" = 'ACEPTO ROOT TOTAL' ] || { err 'No se habilitó la ejecución como root.'; exit 1; }
+      elif [ "${MCP_SETUP_ALLOW_ROOT:-0}" != '1' ] \
+           && [ "${MCP_SETUP_ROOT_CONFIRM:-}" != 'ACEPTO ROOT TOTAL' ]; then
+        err 'Root no interactivo requiere MCP_SETUP_ALLOW_ROOT=1 o MCP_SETUP_ROOT_CONFIRM="ACEPTO ROOT TOTAL".'
+        exit 1
+      fi
+      if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
+        err 'Se eligió root, pero sudo no está disponible. Ejecutá el instalador desde una terminal root o instalá sudo.'
+        exit 1
+      fi
+      set_env 'MCP_RUN_AS_ROOT=1' 'MCP_SERVICE_USER=root'
+      PRIVILEGE_RESULT='root'
+      ;;
+    *) err "Cuenta de ejecución no válida: $choice"; exit 2 ;;
+  esac
+}
+
+configure_confirmation_mode() {
+  local choice confirm default_choice='1'
+  [ "$(read_env MCP_CRITICAL_CONFIRMATIONS)" = '0' ] && default_choice='2'
+
+  line
+  echo ' CONFIRMACIONES PARA ACCIONES CRÍTICAS'
+  line
+  echo '  1) ACTIVADAS (RECOMENDADO)'
+  echo '     Borrado, paquetes, firewall, montajes, contenedores y energía exigen una frase explícita.'
+  echo
+  echo '  2) DESACTIVADAS (RIESGO MUY ALTO)'
+  echo '     Las herramientas dedicadas ejecutan la acción sin pedir DELETE/APPLY/REBOOT.'
+  echo '     Esto no agrega permisos: root o sudo siguen siendo necesarios para tareas administrativas.'
+  echo
+  choice="$(prompt_choice MCP_SETUP_CONFIRMATION_CHOICE 'Modo de confirmación' "$default_choice")"
+  case "$choice" in
+    1|on|yes|si|sí|activadas)
+      set_env 'MCP_CRITICAL_CONFIRMATIONS=1'
+      CONFIRMATION_RESULT='activadas'
+      ;;
+    2|off|no|desactivadas)
+      if [ "$INTERACTIVE" = '1' ]; then
+        echo
+        warn 'Sin confirmaciones, una sola llamada puede borrar datos, cambiar el firewall o apagar el equipo.'
+        read -r -p 'Escribí ACEPTO SIN CONFIRMACIONES para continuar: ' confirm
+        [ "$confirm" = 'ACEPTO SIN CONFIRMACIONES' ] || { err 'Las confirmaciones permanecen activadas.'; exit 1; }
+      elif [ "${MCP_SETUP_ALLOW_NO_CONFIRMATIONS:-0}" != '1' ] \
+           && [ "${MCP_SETUP_NO_CONFIRMATIONS_CONFIRM:-}" != 'ACEPTO SIN CONFIRMACIONES' ]; then
+        err 'Desactivar confirmaciones en modo no interactivo requiere MCP_SETUP_ALLOW_NO_CONFIRMATIONS=1.'
+        exit 1
+      fi
+      set_env 'MCP_CRITICAL_CONFIRMATIONS=0'
+      CONFIRMATION_RESULT='DESACTIVADAS'
+      ;;
+    *) err "Modo de confirmación no válido: $choice"; exit 2 ;;
+  esac
+}
+
 configure_access_only() {
   [ -f "$ENV_FILE" ] || { err 'Primero completá la configuración inicial con bash start-mcp.sh.'; exit 1; }
   chmod 600 "$ENV_FILE"
   install -d -m 0700 "$PRIVATE_DIR" "$ROOT_DIR/.runtime"
   configure_tool_access
-  set_env 'MCP_SETUP_COMPLETE=1' 'MCP_SETUP_VERSION=5'
+  configure_privilege_mode
+  configure_confirmation_mode
+  set_env 'MCP_SETUP_COMPLETE=1' 'MCP_SETUP_VERSION=6'
   line
   echo ' PERFIL DE HERRAMIENTAS ACTUALIZADO'
   line
   echo "Perfil: $ACCESS_PROFILE_RESULT"
+  echo "Cuenta: $PRIVILEGE_RESULT"
+  echo "Confirmaciones: $CONFIRMATION_RESULT"
   echo 'El cambio se aplicará al próximo inicio o reinicio del MCP.'
   echo 'Detalle: ./mcpctl.sh permissions --tools'
   line
@@ -586,6 +699,8 @@ main() {
   fi
 
   configure_tool_access
+  configure_privilege_mode
+  configure_confirmation_mode
 
   echo
   echo 'Cómo publicar el servidor:'
@@ -603,7 +718,7 @@ main() {
   configure_auth "$exposure" "$PUBLIC_URL_RESULT"
   set_env \
     'MCP_SETUP_COMPLETE=1' \
-    'MCP_SETUP_VERSION=5' \
+    'MCP_SETUP_VERSION=6' \
     'MCP_FAST_MODE=1' \
     'MCP_HUMAN_LOG=.runtime/events.log' \
     'ACTIVITY_LOG=.runtime/activity.ndjson' \
@@ -620,6 +735,8 @@ main() {
     echo "URL para ChatGPT: $PUBLIC_URL_RESULT/mcp"
   fi
   echo "Perfil de herramientas: $ACCESS_PROFILE_RESULT"
+  echo "Cuenta de ejecución: $PRIVILEGE_RESULT"
+  echo "Confirmaciones críticas: $CONFIRMATION_RESULT"
   case "$AUTH_RESULT" in
     oauth) echo 'Autenticación: OAuth 2.1. ChatGPT mostrará la pantalla de autorización.' ;;
     bearer) echo "Autenticación: Bearer. Token privado: $PRIVATE_DIR/bearer-token.txt" ;;

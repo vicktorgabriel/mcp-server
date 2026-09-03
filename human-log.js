@@ -3,6 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { applyPrivateOwnership, ensurePrivateDirectory } = require('./private-owner');
 
 const ROOT = __dirname;
 
@@ -29,8 +30,7 @@ function compact(value, max = 220) {
 }
 
 function ensureParent(filePath) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  try { fs.chmodSync(path.dirname(filePath), 0o700); } catch (_) {}
+  ensurePrivateDirectory(path.dirname(filePath), 0o700);
 }
 
 function logLimitBytes(value = process.env.MCP_HUMAN_LOG_MAX_BYTES || process.env.MCP_RUNTIME_LOG_MAX_BYTES) {
@@ -46,7 +46,7 @@ function rotateLog(filePath, maxBytes = logLimitBytes()) {
     const previous = `${filePath}.1`;
     try { fs.unlinkSync(previous); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     fs.renameSync(filePath, previous);
-    try { fs.chmodSync(previous, 0o600); } catch (_) {}
+    applyPrivateOwnership(previous, 0o600);
     return true;
   } catch (error) {
     if (error.code === 'ENOENT') return false;
@@ -58,7 +58,7 @@ function appendPrivateLine(filePath, line, options = {}) {
   ensureParent(filePath);
   rotateLog(filePath, logLimitBytes(options.maxBytes));
   fs.appendFileSync(filePath, `${String(line).replace(/\r?\n$/, '')}\n`, { encoding: 'utf8', mode: 0o600 });
-  try { fs.chmodSync(filePath, 0o600); } catch (_) {}
+  applyPrivateOwnership(filePath, 0o600);
 }
 
 function humanEvent(category, message, options = {}) {

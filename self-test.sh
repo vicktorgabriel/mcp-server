@@ -16,6 +16,13 @@ export MCP_TOOL_DENYLIST="${MCP_TOOL_DENYLIST:-}"
 export WORKING_DIR="${WORKING_DIR:-$(cd .. && pwd)}"
 export MCP_AUTH_MODE=none
 export MCP_EXPOSURE_MODE=local
+export MCP_CONFIG_SOURCE=
+export MCP_PUBLIC_BASE_URL=
+export PUBLIC_BASE_URL=
+export NGROK_URL=
+export NGROK_DOMAIN=
+export MCP_RUN_AS_ROOT=0
+export MCP_CRITICAL_CONFIRMATIONS=1
 export MCP_ALLOW_UNSAFE_NO_AUTH=0
 export MCP_HUMAN_LOG="$SELFTEST_TMP/events.log"
 export ACTIVITY_LOG="$SELFTEST_TMP/activity.ndjson"
@@ -27,8 +34,8 @@ npm run check
 printf '\n== Launcher and administration commands ==\n'
 LAUNCHER_HELP="$(./start-mcp.sh --help)"
 CONTROL_HELP="$(./mcpctl.sh --help)"
-for option in --temporary --persistent --configure --permissions --permissions-set --chatgpt; do grep -q -- "$option" <<<"$LAUNCHER_HELP"; done
-for command in configure permissions permissions-set chatgpt logs-follow logs-raw oauth-status oauth-reset; do grep -q "$command" <<<"$CONTROL_HELP"; done
+for option in --temporary --persistent --configure --permissions --permissions-set --update-check --chatgpt; do grep -q -- "$option" <<<"$LAUNCHER_HELP"; done
+for command in configure permissions permissions-set update-check chatgpt logs-follow logs-raw oauth-status oauth-reset; do grep -q "$command" <<<"$CONTROL_HELP"; done
 grep -q 'MCP_LAUNCH_MODE=persistent' install-service.sh
 PERMISSIONS_OUTPUT="$(MCP_ACCESS_PROFILE=read_only MCP_FULL_ACCESS=0 ./mcpctl.sh permissions --tools)"
 grep -q 'Sólo lectura y observación' <<<"$PERMISSIONS_OUTPUT"
@@ -38,6 +45,9 @@ echo 'launcher_and_control=OK'
 
 printf '\n== First-run wizard ==\n'
 ./setup-self-test.sh
+
+printf '\n== Startup dashboard and update notice ==\n'
+node startup-banner-self-test.js
 
 printf '\n== Access profiles ==\n'
 node access-policy-self-test.js
@@ -145,10 +155,12 @@ printf '\n== Temporary supervisor and readable logs ==\n'
   HEALTH="$(curl -fsS "http://127.0.0.1:$TEST_PORT/health")"
   printf '%s' "$HEALTH" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const x=JSON.parse(s);if(!x.ok||x.auth!=="none"||x.allowedRoots!==undefined)process.exit(1);});'
   STATUS_JSON="$(PORT="$TEST_PORT" HOST=127.0.0.1 MCP_EXPOSURE_MODE=local MCP_AUTH_MODE=none MCP_RUNTIME_DIR="$TEST_DIR/runtime" MCP_HUMAN_LOG="$TEST_DIR/runtime/events.log" node runtime-diagnostics.js status)"
-  printf '%s' "$STATUS_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const j=JSON.parse(s);if(!j.ok||!j.launch.temporary||j.launch.persistent||j.config.authMode!=="none") {console.error(j);process.exit(1)}});'
+  printf '%s' "$STATUS_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const j=JSON.parse(s);const r=j.runtime&&j.runtime.status;if(!j.ok||!j.launch.temporary||j.launch.persistent||j.config.authMode!=="none"||!r||r.version!=="4.2.0"||r.toolCount!==72||r.totalToolCount!==72||r.runAsRoot!==false||r.criticalConfirmations!==true) {console.error(j);process.exit(1)}});'
   VIEW="$(PORT="$TEST_PORT" HOST=127.0.0.1 MCP_EXPOSURE_MODE=local MCP_AUTH_MODE=none MCP_RUNTIME_DIR="$TEST_DIR/runtime" MCP_HUMAN_LOG="$TEST_DIR/runtime/events.log" node log-viewer.js --lines 40)"
   grep -q 'ACTIVIDAD DEL SERVIDOR MCP' <<<"$VIEW"
-  grep -q 'Servidor MCP local listo' "$TEST_DIR/runtime/events.log"
+  grep -Eq 'Servidor MCP( v[^ ]+)? (local )?listo' "$TEST_DIR/runtime/events.log"
+  grep -q '72 herramientas' "$TEST_DIR/runtime/events.log"
+  grep -q 'confirmaciones activadas' "$TEST_DIR/runtime/events.log"
   echo 'temporary_runtime_and_logs=OK'
 )
 

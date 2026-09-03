@@ -97,6 +97,21 @@ function main() {
   const full = createAccessPolicy({ MCP_ACCESS_PROFILE: 'full' }, toolNames);
   assert.equal(full.isAllowed('power_action'), true);
   assert.equal(full.summary().blockedToolCount, 0);
+  assert.equal(full.summary().runAsRoot, false);
+  assert.equal(full.summary().criticalConfirmations, true);
+
+  const expert = createAccessPolicy({
+    MCP_ACCESS_PROFILE: 'full',
+    MCP_RUN_AS_ROOT: '1',
+    MCP_CRITICAL_CONFIRMATIONS: '0',
+    MCP_FULL_ACCESS: '1'
+  }, toolNames);
+  const expertSummary = expert.summary();
+  assert.equal(expertSummary.runAsRoot, true);
+  assert.equal(expertSummary.executionMode, 'root');
+  assert.equal(expertSummary.criticalConfirmations, false);
+  assert.ok(expertSummary.warnings.some((warning) => /root/i.test(warning)));
+  assert.ok(expertSummary.warnings.some((warning) => /confirmaciones.*desactivadas/i.test(warning)));
 
   const custom = createAccessPolicy({
     MCP_ACCESS_PROFILE: 'custom',
@@ -153,6 +168,31 @@ function main() {
   const blocked = callBlocked('read_only', 'run_command');
   assert.ok(blocked.error);
   assert.match(blocked.error.message, /bloqueada por el perfil/i);
+
+  if (typeof process.getuid === 'function' && process.getuid() !== 0) {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-root-flag-'));
+    try {
+      const result = spawnSync(process.execPath, [path.join(__dirname, 'mcp-server.js'), '--stdio'], {
+        cwd: __dirname,
+        input: `${JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/list', params: {} })}\n`,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          MCP_ACCESS_PROFILE: 'full',
+          MCP_RUN_AS_ROOT: '1',
+          MCP_EXPOSURE_MODE: 'local',
+          MCP_AUTH_MODE: 'none',
+          MCP_FULL_ACCESS: '0',
+          ALLOWED_PATHS: temp,
+          WORKING_DIR: temp
+        }
+      });
+      assert.notEqual(result.status, 0);
+      assert.match(`${result.stderr}${result.stdout}`, /no tiene uid 0/i);
+    } finally {
+      fs.rmSync(temp, { recursive: true, force: true });
+    }
+  }
 
   process.stdout.write('access_policy=OK\n');
 }

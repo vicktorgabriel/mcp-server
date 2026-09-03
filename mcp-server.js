@@ -70,6 +70,7 @@ const KEEP_ALIVE_TIMEOUT_MS = parseNumber(process.env.KEEP_ALIVE_TIMEOUT_MS, 0, 
 const searchCache = new Map();
 
 if (!FULL_ACCESS) validateAllowedRoots(ALLOWED_ROOTS);
+validateExecutionConfiguration();
 validateAuthConfiguration();
 
 class Logger {
@@ -210,6 +211,14 @@ function isLoopbackAddress(address) {
   return normalized === '::1' || normalized === '127.0.0.1' || normalized.startsWith('127.');
 }
 
+function validateExecutionConfiguration() {
+  if (!ACCESS_SUMMARY.runAsRoot || process.platform === 'win32') return;
+  const actualUid = typeof process.getuid === 'function' ? process.getuid() : null;
+  if (actualUid !== 0 && process.env.MCP_TEST_ALLOW_ROOT_FLAG !== '1') {
+    throw new Error('MCP_RUN_AS_ROOT=1, pero el proceso no tiene uid 0. Iniciá mediante bash start-mcp.sh para que el launcher aplique sudo.');
+  }
+}
+
 function validateAuthConfiguration() {
   if (!process.argv.includes('--http')) return;
   if (AUTH_MODE === 'none' && EXPOSURE_MODE !== 'local' && !parseBoolean(process.env.MCP_ALLOW_UNSAFE_NO_AUTH, false)) {
@@ -287,7 +296,8 @@ function loadDotEnv() {
       value = value.slice(1, -1);
     }
 
-    if (process.env[key] === undefined) process.env[key] = value;
+    const filePriority = String(process.env.MCP_CONFIG_SOURCE || '').toLowerCase() === 'file';
+    if (filePriority || process.env[key] === undefined) process.env[key] = value;
   }
 }
 
@@ -359,6 +369,7 @@ function recommendedStdioEnv() {
     MCP_ACCESS_GROUPS: envValue('MCP_ACCESS_GROUPS', ''),
     MCP_TOOL_ALLOWLIST: envValue('MCP_TOOL_ALLOWLIST', ''),
     MCP_TOOL_DENYLIST: envValue('MCP_TOOL_DENYLIST', ''),
+    MCP_CRITICAL_CONFIRMATIONS: envValue('MCP_CRITICAL_CONFIRMATIONS', 1),
     ALLOWED_PATHS: rootForDisplay(),
     WORKING_DIR: envValue('WORKING_DIR', DEFAULT_ROOT),
     MCP_FAST_MODE: envValue('MCP_FAST_MODE', 1),
@@ -644,9 +655,12 @@ class MCPFileServer {
     this.fullControl = createFullControl({ resolvePath, buildToolMetadata, textResult });
     this.extendedTools = createExtendedTools({ resolvePath, buildToolMetadata, textResult });
     this.accessPolicy = ACCESS_POLICY;
+    this.allTools = Object.freeze(this.getAllTools());
+    this.publishedTools = Object.freeze(this.accessPolicy.filterTools(this.allTools));
   }
 
   getAllTools() {
+    if (this.allTools) return this.allTools;
     const baseTools = [
       {
         name: 'tool_policy_status',
@@ -807,7 +821,7 @@ class MCPFileServer {
   }
 
   getTools() {
-    return this.accessPolicy.filterTools(this.getAllTools());
+    return this.publishedTools || this.accessPolicy.filterTools(this.getAllTools());
   }
 
   policySummary() {
@@ -1352,7 +1366,7 @@ function startHttp() {
       const requestContext = { principal: authResult.principal, baseUrl };
 
       if (url.pathname === '/config' && req.method === 'GET') {
-        sendJson(res, 200, buildClientConfig(baseUrl));
+        sendJson(res, 200, buildClientConfig(baseUrl, mcp));
         return;
       }
 
@@ -1441,7 +1455,7 @@ function startHttp() {
     if (AUTH_MODE === 'none' && EXPOSURE_MODE !== 'local') {
       humanEvent('SEGURIDAD', 'Advertencia: el MCP está publicado sin autenticación. Usá OAuth para una instalación permanente.');
     }
-    printConfig(CONFIGURED_PUBLIC_BASE_URL || `http://${HOST}:${PORT}`);
+    printConfig(CONFIGURED_PUBLIC_BASE_URL || `http://${HOST}:${PORT}`, mcp);
   });
 }
 
@@ -1492,7 +1506,7 @@ function authDisplayName() {
   return 'Sin autenticación';
 }
 
-function buildClientConfig(baseUrl) {
+function buildClientConfig(baseUrl, mcp = null) {
   const normalizedBase = (() => {
     try { return normalizeBaseUrl(baseUrl); } catch (_) { return String(baseUrl || '').replace(/\/+$/, ''); }
   })();
@@ -1505,6 +1519,7 @@ function buildClientConfig(baseUrl) {
     note: 'Recomendado para clientes instalados en la misma computadora.'
   };
 
+  const server = mcp || new MCPFileServer();
   return {
     chatgpt: {
       name: 'MCP Local Full Control',
@@ -1527,17 +1542,17 @@ function buildClientConfig(baseUrl) {
     claudeDesktop: stdioConfig,
     localRecommended: stdioConfig,
     allowedRoots: ALLOWED_ROOTS,
-    tools: new MCPFileServer().getTools().map((tool) => tool.name),
+    tools: server.getTools().map((tool) => tool.name),
     fullAccess: FULL_ACCESS,
-    accessPolicy: new MCPFileServer().policySummary(),
+    accessPolicy: server.policySummary(),
     authMode: AUTH_MODE,
     bearerTokenConfigured: AUTH_MODE === 'bearer' && Boolean(AUTH_TOKEN),
     oauth: AUTH_MODE === 'oauth' ? OAUTH_PROVIDER.authSummary() : null
   };
 }
 
-function printConfig(baseUrl) {
-  const config = buildClientConfig(baseUrl);
+function printConfig(baseUrl, mcp = null) {
+  const config = buildClientConfig(baseUrl, mcp);
   humanEvent('CONFIGURACION', `URL para ChatGPT: ${config.chatgpt.url}`);
   humanEvent('CONFIGURACION', `Autenticación seleccionada: ${config.chatgpt.auth}.`);
   humanEvent('CONFIGURACION', `Rutas permitidas: ${rootForDisplay()}.`);

@@ -244,6 +244,60 @@ async function main() {
     await call('file_delete', { path: 'moved.txt', confirm: 'DELETE' });
     assert.equal(fs.existsSync(path.join(root, 'moved.txt')), false);
 
+    const noConfirmEnv = {
+      ...process.env,
+      MCP_EXPOSURE_MODE: 'local',
+      MCP_AUTH_MODE: 'none',
+      MCP_ACCESS_PROFILE: 'full',
+      MCP_FULL_ACCESS: '0',
+      MCP_CRITICAL_CONFIRMATIONS: '0',
+      ALLOWED_PATHS: root,
+      WORKING_DIR: root,
+      MCP_HUMAN_LOG: path.join(root, '.runtime', 'no-confirm-events.log'),
+      ACTIVITY_LOG: path.join(root, '.runtime', 'no-confirm-activity.ndjson'),
+      MCP_ERROR_LOG: path.join(root, '.runtime', 'no-confirm-errors.log'),
+      MCP_DESKTOP_ENABLED: '0',
+      MCP_INPUT_ENABLED: '0'
+    };
+    const stdio = (request) => {
+      const result = spawnSync(process.execPath, [path.join(__dirname, 'mcp-server.js'), '--stdio'], {
+        cwd: __dirname,
+        input: `${JSON.stringify(request)}\n`,
+        encoding: 'utf8',
+        env: noConfirmEnv
+      });
+      assert.equal(result.status, 0, result.stderr);
+      return JSON.parse(result.stdout.trim());
+    };
+
+    const noConfirmTools = stdio({ jsonrpc: '2.0', id: 80, method: 'tools/list', params: {} });
+    for (const toolName of ['file_delete', 'package_action', 'firewall_action', 'mount_action', 'power_action']) {
+      const tool = noConfirmTools.result.tools.find((entry) => entry.name === toolName);
+      assert.ok(tool, `${toolName} missing`);
+      assert.ok(!tool.inputSchema.required.includes('confirm'), `${toolName} must not require confirm when disabled`);
+    }
+    const composeTool = noConfirmTools.result.tools.find((entry) => entry.name === 'container_compose');
+    assert.ok(composeTool && !composeTool.inputSchema.required.includes('confirm'));
+
+    fs.writeFileSync(path.join(root, 'no-confirm-delete.txt'), 'temporary\n');
+    const deletedWithoutPhrase = stdio({
+      jsonrpc: '2.0',
+      id: 81,
+      method: 'tools/call',
+      params: { name: 'file_delete', arguments: { path: 'no-confirm-delete.txt' } }
+    });
+    assert.equal(deletedWithoutPhrase.error, undefined);
+    assert.equal(fs.existsSync(path.join(root, 'no-confirm-delete.txt')), false);
+
+    const powerWithoutPhrase = stdio({
+      jsonrpc: '2.0',
+      id: 82,
+      method: 'tools/call',
+      params: { name: 'power_action', arguments: { action: 'reboot', dryRun: true } }
+    });
+    assert.equal(powerWithoutPhrase.error, undefined);
+    assert.equal(powerWithoutPhrase.result.structuredContent.dryRun, true);
+
     process.stdout.write('extended_tools=OK\n');
   } finally {
     source.close();

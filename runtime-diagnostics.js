@@ -31,6 +31,8 @@ function parseDotEnv(filePath = path.join(ROOT, '.env')) {
 }
 
 function configValue(fileEnv, key, fallback = '') {
+  const filePriority = String(process.env.MCP_CONFIG_SOURCE || '').toLowerCase() === 'file';
+  if (filePriority && fileEnv[key] !== undefined && fileEnv[key] !== '') return fileEnv[key];
   if (process.env[key] !== undefined && process.env[key] !== '') return process.env[key];
   if (fileEnv[key] !== undefined && fileEnv[key] !== '') return fileEnv[key];
   return fallback;
@@ -369,6 +371,9 @@ async function collectRuntimeStatus() {
       toolDenylist: accessPolicy ? accessPolicy.denylist : [],
       allowedToolCount: accessPolicy ? accessPolicy.allowedToolCount : 0,
       blockedToolCount: accessPolicy ? accessPolicy.blockedToolCount : 0,
+      executionMode: accessPolicy ? accessPolicy.executionMode : (String(configValue(fileEnv, 'MCP_RUN_AS_ROOT', '0')) === '1' ? 'root' : 'user'),
+      runAsRoot: accessPolicy ? accessPolicy.runAsRoot : String(configValue(fileEnv, 'MCP_RUN_AS_ROOT', '0')) === '1',
+      criticalConfirmations: accessPolicy ? accessPolicy.criticalConfirmations : String(configValue(fileEnv, 'MCP_CRITICAL_CONFIRMATIONS', '1')) !== '0',
       authMode,
       authConfigured: authMode === 'oauth' ? fs.existsSync(oauthStorePath) : authMode === 'bearer' ? bearerConfigured : false,
       oauthStorePresent: authMode === 'oauth' && fs.existsSync(oauthStorePath),

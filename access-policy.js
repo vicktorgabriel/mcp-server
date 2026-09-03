@@ -155,6 +155,16 @@ function parseCsv(value) {
   )];
 }
 
+function boolValue(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+}
+
+function confirmationsRequired(value) {
+  if (value === undefined || value === null || value === '') return true;
+  return !['0', 'false', 'no', 'off'].includes(String(value).trim().toLowerCase());
+}
+
 function normalizeProfile(value) {
   const raw = String(value || 'developer').trim().toLowerCase().replace(/[ -]+/g, '_');
   const aliases = {
@@ -184,6 +194,8 @@ function createAccessPolicy(env = process.env, allToolNames = []) {
   const groups = new Set(profile === 'custom' ? configuredGroups : PROFILE_GROUPS[profile]);
   const allowlist = new Set(parseCsv(env.MCP_TOOL_ALLOWLIST));
   const denylist = new Set(parseCsv(env.MCP_TOOL_DENYLIST));
+  const runAsRoot = boolValue(env.MCP_RUN_AS_ROOT, false);
+  const criticalConfirmations = confirmationsRequired(env.MCP_CRITICAL_CONFIRMATIONS);
   const knownGroups = new Set(Object.keys(GROUPS));
   const unknownGroups = [...groups].filter((group) => !knownGroups.has(group));
   if (unknownGroups.length > 0) {
@@ -227,8 +239,10 @@ function createAccessPolicy(env = process.env, allToolNames = []) {
     if (groups.has('command_execution')) warnings.push('La ejecución genérica de comandos puede realizar muchas acciones con los permisos del usuario del MCP.');
     if (groups.has('desktop_control')) warnings.push('El perfil permite controlar teclado, mouse y ventanas.');
     if (groups.has('camera')) warnings.push('El perfil permite capturar imágenes de cámaras conectadas.');
-    if (groups.has('power')) warnings.push('El perfil permite reiniciar o apagar el equipo con confirmación explícita.');
+    if (groups.has('power')) warnings.push(`El perfil permite reiniciar o apagar el equipo${criticalConfirmations ? ' con confirmación explícita' : ' sin confirmación adicional'}.`);
     if (String(env.MCP_FULL_ACCESS || '0') === '1') warnings.push('El alcance de archivos está configurado como FULL ACCESS (/).');
+    if (runAsRoot) warnings.push('El servidor está configurado para ejecutarse como root.');
+    if (!criticalConfirmations) warnings.push('Las confirmaciones adicionales para operaciones críticas están desactivadas.');
     return {
       profile,
       label: PROFILE_LABELS[profile],
@@ -236,6 +250,9 @@ function createAccessPolicy(env = process.env, allToolNames = []) {
       groupDescriptions: Object.fromEntries([...groups].sort().map((group) => [group, GROUPS[group]])),
       allowlist: [...allowlist].sort(),
       denylist: [...denylist].sort(),
+      executionMode: runAsRoot ? 'root' : 'user',
+      runAsRoot,
+      criticalConfirmations,
       allowedToolCount: allowedTools.length,
       blockedToolCount: blockedTools.length,
       allowedTools,
@@ -251,6 +268,8 @@ function createAccessPolicy(env = process.env, allToolNames = []) {
     groups,
     allowlist,
     denylist,
+    runAsRoot,
+    criticalConfirmations,
     isAllowed,
     assertAllowed,
     filterTools,
@@ -263,6 +282,8 @@ module.exports = {
   PROFILE_GROUPS,
   PROFILE_LABELS,
   TOOL_REQUIREMENTS,
+  boolValue,
+  confirmationsRequired,
   createAccessPolicy,
   normalizeProfile,
   parseCsv

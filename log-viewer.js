@@ -87,6 +87,10 @@ async function printHeader(status, includeTable = true) {
     ? `, ${status.config.allowedToolCount} herramientas`
     : '';
   process.stdout.write(`Acceso:          ${accessLabel}${accessCount}\n`);
+  const execution = status.config && status.config.runAsRoot ? 'root' : 'usuario normal';
+  const confirmations = status.config && status.config.criticalConfirmations === false ? 'DESACTIVADAS' : 'activadas';
+  process.stdout.write(`Ejecución:       ${execution}\n`);
+  process.stdout.write(`Confirmaciones:  ${confirmations}\n`);
   process.stdout.write(`Conexión:        ${url}\n`);
   if (status.warnings && status.warnings.length) {
     process.stdout.write(`Aviso:           ${redactText(status.warnings[0])}\n`);
