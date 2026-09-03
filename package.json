@@ -1,11 +1,11 @@
 {
   "name": "mcp-server-local",
-  "version": "4.5.1",
+  "version": "4.5.2",
   "description": "Servidor MCP local/privado con OAuth 2.1 compatible con ChatGPT y 72 herramientas",
   "main": "mcp-server.js",
   "scripts": {
-    "test": "npm run check && node startup-banner-self-test.js && node access-policy-self-test.js && node extended-tools-self-test.js && node auth-mode-self-test.js && node oauth-admin-self-test.js && node oauth-cimd-self-test.js && node oauth-private-key-jwt-self-test.js && node oauth-self-test.js && ./setup-self-test.sh",
-    "check": "node --check mcp-server.js && node --check full-control-tools.js && node --check extended-tools.js && node --check access-policy.js && node --check access-policy-cli.js && node --check startup-banner.js && node --check private-owner.js && node --check runtime-diagnostics.js && node --check mcp-supervisor.js && node --check human-log.js && node --check log-viewer.js && node --check oauth-provider.js && node --check oauth-admin.js && node --check oauth-admin-self-test.js && node --check oauth-cimd-self-test.js && node --check oauth-private-key-jwt-self-test.js && node --check chatgpt-guide.js && node --check oauth-self-test.js && node --check auth-mode-self-test.js && node --check access-policy-self-test.js && node --check extended-tools-self-test.js && node --check startup-banner-self-test.js && python3 -m py_compile desktop-control.py && bash -n start-mcp.sh setup-mcp.sh configure-mcp.sh configure-ngrok.sh install-service.sh mcpctl.sh install-deps.sh install-ngrok.sh self-test.sh setup-self-test.sh",
+    "test": "npm run check && node startup-banner-self-test.js && node access-policy-self-test.js && node extended-tools-self-test.js && node auth-mode-self-test.js && node oauth-admin-self-test.js && node oauth-transaction-self-test.js && node oauth-cimd-self-test.js && node oauth-private-key-jwt-self-test.js && node oauth-self-test.js && ./setup-self-test.sh",
+    "check": "node --check mcp-server.js && node --check full-control-tools.js && node --check extended-tools.js && node --check access-policy.js && node --check access-policy-cli.js && node --check startup-banner.js && node --check private-owner.js && node --check runtime-diagnostics.js && node --check mcp-supervisor.js && node --check human-log.js && node --check log-viewer.js && node --check oauth-provider.js && node --check oauth-admin.js && node --check oauth-admin-self-test.js && node --check oauth-transaction-self-test.js && node --check oauth-cimd-self-test.js && node --check oauth-private-key-jwt-self-test.js && node --check chatgpt-guide.js && node --check oauth-self-test.js && node --check auth-mode-self-test.js && node --check access-policy-self-test.js && node --check extended-tools-self-test.js && node --check startup-banner-self-test.js && python3 -m py_compile desktop-control.py && bash -n start-mcp.sh setup-mcp.sh configure-mcp.sh configure-ngrok.sh install-service.sh mcpctl.sh install-deps.sh install-ngrok.sh self-test.sh setup-self-test.sh",
     "selftest": "./self-test.sh",
     "start": "node mcp-server.js --http",
     "stdio": "node mcp-server.js --stdio",
@@ -26,7 +26,8 @@
     "startup:test": "node startup-banner-self-test.js",
     "oauth:admin:test": "node oauth-admin-self-test.js",
     "oauth:cimd:test": "node oauth-cimd-self-test.js",
-    "oauth:private-key:test": "node oauth-private-key-jwt-self-test.js"
+    "oauth:private-key:test": "node oauth-private-key-jwt-self-test.js",
+    "oauth:transaction:test": "node oauth-transaction-self-test.js"
   },
   "keywords": [
     "mcp",

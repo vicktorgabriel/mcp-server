@@ -1,6 +1,6 @@
 # MCP Local Full Control
 
-> **4.5.1:** corrige la visualización de la pantalla OAuth en la interfaz nueva de Plugins. Las páginas `/oauth/authorize` ya no envían `X-Frame-Options: DENY`; el CSP permite framing únicamente desde ChatGPT (`chatgpt.com` y sus subdominios) y mantiene bloqueados otros orígenes. El log de autorización ahora informa si el navegador pidió la página como `iframe`, `document` u otro destino, sin registrar secretos.
+> **4.5.2:** endurece el estado OAuth frente a solicitudes simultáneas y agrega trazas seguras de transacción. Después de cada operación asíncrona crítica se recarga el estado antes de guardar, evitando pisar sesiones concurrentes. Los logs muestran sólo una huella SHA-256 abreviada de la transacción, nunca el ID real, contraseña, state, code, verifier ni tokens.
 
 Servidor MCP para administrar un equipo propio desde ChatGPT y otros clientes compatibles. Expone herramientas de archivos, comandos, procesos, servicios, Git, tmux, escritorio, captura de pantalla, cámara, audio y diagnóstico del sistema.
 

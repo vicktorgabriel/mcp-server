@@ -949,6 +949,12 @@ ${this.accessRiskNotice()}
       }
       humanEvent('OAUTH', `El documento CIMD de ChatGPT no respondió (${redactText(error.message)}). Se usará el perfil oficial integrado para este client_id y se mantendrán PKCE, redirect_uri y resource obligatorios.`);
     }
+    // The CIMD fetch above yields to the event loop. Reload before any later
+    // mutation so a concurrent OAuth request cannot be overwritten by the
+    // state snapshot that existed before the fetch started.
+    this.refreshStore();
+    const latestExisting = this.store.state.clients[rawId];
+
     if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
       throw new OAuthError('unauthorized_client', 'El documento CIMD no contiene metadatos OAuth válidos.');
     }
@@ -994,7 +1000,7 @@ ${this.accessRiskNotice()}
       throw new OAuthError('unauthorized_client', 'El servidor sólo admite RS256 para private_key_jwt.');
     }
 
-    if (!existing && Object.keys(this.store.state.clients).length >= this.maxClients) {
+    if (!latestExisting && Object.keys(this.store.state.clients).length >= this.maxClients) {
       this.pruneUnusedClients();
       if (Object.keys(this.store.state.clients).length >= this.maxClients) {
         throw new OAuthError('unauthorized_client', 'Se alcanzó el máximo de clientes OAuth activos. Revocá conexiones antiguas.');
@@ -1021,8 +1027,8 @@ ${this.accessRiskNotice()}
       cimdMetadataUrl: cimdUrl,
       cimdMetadataSource: metadata._mcpFallback ? 'official-chatgpt-fallback' : 'remote',
       cimdValidatedAt: now,
-      issuedAt: existing && existing.issuedAt ? existing.issuedAt : now,
-      createdAt: existing && existing.createdAt ? existing.createdAt : new Date().toISOString()
+      issuedAt: latestExisting && latestExisting.issuedAt ? latestExisting.issuedAt : now,
+      createdAt: latestExisting && latestExisting.createdAt ? latestExisting.createdAt : new Date().toISOString()
     };
     this.store.state.clients[cimdUrl] = record;
     this.store.save();
@@ -1100,11 +1106,16 @@ ${this.accessRiskNotice()}
       try { if (req.headers.referer) refererHost = new URL(String(req.headers.referer)).host.slice(0, 128); } catch (_) {}
       humanEvent('OAUTH', `Inicio de autorización desde ${ip}: cliente=${requestedClientId.startsWith('https://chatgpt.com/oauth/') ? 'ChatGPT CIMD' : requestedClientId ? 'cliente DCR/predefinido' : 'ausente'}, redirect=${redirectDisplay}, state=${url.searchParams.has('state') ? 'presente' : 'ausente'}, PKCE=${String(url.searchParams.get('code_challenge_method') || '')}/${String(url.searchParams.get('code_challenge') || '').length}, resource=${requestedResources.length === 1 && timingSafeTextEqual(String(requestedResources[0]).replace(/\/+$/, ''), normalizeResource(issuer)) ? 'correcto' : `no coincide (${requestedResources.length})`}, presentación=${fetchDest}, origen=${fetchSite}, referencia=${refererHost}.`);
       const request = await this.validateAuthorizationRequest(url, issuer);
+      // validateAuthorizationRequest is async. Reload after it completes so two
+      // overlapping authorization starts accumulate their transactions instead
+      // of the later save replacing the earlier request's state snapshot.
+      this.refreshStore();
       if (Object.keys(this.store.state.authorizationTransactions).length >= this.maxTransactions) {
         this.pruneAuthorizationTransactions();
       }
       const transactionId = `tx_${randomValue(32)}`;
-      this.store.state.authorizationTransactions[tokenHash(transactionId)] = {
+      const transactionKey = tokenHash(transactionId);
+      this.store.state.authorizationTransactions[transactionKey] = {
         clientId: request.clientId,
         redirectUri: request.redirectUri,
         state: request.state,
@@ -1116,6 +1127,7 @@ ${this.accessRiskNotice()}
         remoteAddress: remoteAddress(req)
       };
       this.store.save();
+      humanEvent('OAUTH', `Transacción OAuth creada: referencia=${transactionKey.slice(0, 12)}, activas=${Object.keys(this.store.state.authorizationTransactions).length}, proceso=${process.pid}.`);
       sendHtml(res, 200, this.renderAuthorizationPage(transactionId, request.client, request.redirectUri));
     } catch (error) {
       humanEvent('SEGURIDAD', `No se pudo iniciar la autorización OAuth desde ${ip}: ${redactText(error.message)}`);
@@ -1156,10 +1168,18 @@ ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
       this.refreshStore();
       const transactionId = String(form.get('transaction') || '');
       const key = tokenHash(transactionId);
+      const transactionKeys = Object.keys(this.store.state.authorizationTransactions || {});
       const transaction = this.store.state.authorizationTransactions[key];
+      const transactionRef = transactionId ? key.slice(0, 12) : 'ausente';
+      const decision = ['allow', 'deny'].includes(String(form.get('decision') || '')) ? String(form.get('decision')) : 'desconocida';
+      humanEvent('OAUTH', `Formulario OAuth recibido: referencia=${transactionRef}, encontrada=${Boolean(transaction)}, activas=${transactionKeys.length}, decisión=${decision}, usuario=${form.has('username') ? 'presente' : 'ausente'}, contraseña=${form.has('password') ? 'presente' : 'ausente'}, proceso=${process.pid}.`);
       if (!transaction || transaction.expiresAt <= nowSeconds()) {
-        delete this.store.state.authorizationTransactions[key];
-        this.store.save();
+        if (transaction) {
+          delete this.store.state.authorizationTransactions[key];
+          this.store.save();
+        }
+        const visibleRefs = transactionKeys.slice(0, 6).map((value) => value.slice(0, 12)).join(',') || 'ninguna';
+        humanEvent('SEGURIDAD', `Transacción OAuth no disponible: recibida=${transactionRef}, referencias activas=${visibleRefs}.`);
         throw new OAuthError('invalid_request', 'La autorización venció. Volvé a iniciar la conexión desde ChatGPT.');
       }
       const client = this.store.state.clients[transaction.clientId];
@@ -1373,6 +1393,9 @@ ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
       humanEvent('OAUTH', `Solicitud al token endpoint desde ${ip}: grant=${summary.grantType || 'ausente'}, cliente=${summary.client}, autenticación=${summary.authMethod}, resource=${summary.resourceMatches ? 'correcto' : `no coincide (${summary.resourceCount})`}, PKCE=${summary.codeVerifierPresent ? `${summary.codeVerifierLength} caracteres` : 'ausente'}.`);
       this.refreshStore();
       const client = await this.authenticateClient(req, form, issuer);
+      // Client authentication may perform CIMD/JWKS network I/O. Rebase before
+      // consuming codes or rotating tokens to preserve concurrent sessions.
+      this.refreshStore();
       const grantType = String(form.get('grant_type') || '');
       let response;
       if (grantType === 'authorization_code') {
@@ -1527,6 +1550,7 @@ ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
       const form = await readForm(req, 64 * 1024);
       this.refreshStore();
       const client = await this.authenticateClient(req, form, issuer);
+      this.refreshStore();
       const key = tokenHash(String(form.get('token') || ''));
       const access = this.store.state.accessTokens[key];
       const refresh = this.store.state.refreshTokens[key];
