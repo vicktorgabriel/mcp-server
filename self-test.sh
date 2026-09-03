@@ -64,6 +64,9 @@ node oauth-admin-self-test.js
 printf '\n== OAuth Client ID Metadata Documents ==\n'
 node oauth-cimd-self-test.js
 
+printf '\n== OAuth private_key_jwt token authentication ==\n'
+node oauth-private-key-jwt-self-test.js
+
 printf '\n== OAuth end-to-end ==\n'
 node oauth-self-test.js
 

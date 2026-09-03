@@ -13,6 +13,7 @@ const DEFAULT_SCOPE = 'mcp:tools';
 const OFFLINE_SCOPE = 'offline_access';
 const SUPPORTED_SCOPES = new Set([DEFAULT_SCOPE, OFFLINE_SCOPE]);
 const STORE_VERSION = 1;
+const CLIENT_ASSERTION_TYPE = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
 
 function nowSeconds() {
   return Math.floor(Date.now() / 1000);
@@ -266,6 +267,68 @@ async function defaultCimdFetcher(url, { timeoutMs = 5000, maxBytes = 32768 } = 
   }
 }
 
+function validateSameOriginHttpsUrl(raw, expectedOrigin) {
+  try {
+    const parsed = new URL(String(raw || ''));
+    if (parsed.protocol !== 'https:' || parsed.origin !== expectedOrigin) return '';
+    if (parsed.username || parsed.password || parsed.hash || parsed.search) return '';
+    if (!parsed.pathname || parsed.pathname === '/' || parsed.pathname.includes('/../') || parsed.pathname.includes('/./')) return '';
+    return parsed.toString();
+  } catch (_) {
+    return '';
+  }
+}
+
+function decodeJwtPart(value, label) {
+  try {
+    return JSON.parse(Buffer.from(String(value || ''), 'base64url').toString('utf8'));
+  } catch (_) {
+    throw new OAuthError('invalid_client', `La aserción private_key_jwt contiene ${label} inválido.`, 401);
+  }
+}
+
+function jwtAudienceMatches(audience, expectedValues) {
+  const values = Array.isArray(audience) ? audience.map(String) : [String(audience || '')];
+  return values.some((value) => expectedValues.some((expected) => timingSafeTextEqual(value, expected)));
+}
+
+function detectTokenAuthMethod(req, form) {
+  const authorization = String(req.headers.authorization || '');
+  if (form.get('client_assertion')) return 'private_key_jwt';
+  if (/^Basic\s+/i.test(authorization)) return 'client_secret_basic';
+  if (form.get('client_secret')) return 'client_secret_post';
+  return 'none';
+}
+
+function safeTokenRequestSummary(req, form, issuer) {
+  const clientId = String(form.get('client_id') || '');
+  const redirectUri = String(form.get('redirect_uri') || '');
+  let redirect = '';
+  try {
+    const parsed = new URL(redirectUri);
+    redirect = `${parsed.origin}${parsed.pathname}`.slice(0, 256);
+  } catch (_) {}
+  const resources = form.getAll('resource');
+  const expectedResource = normalizeResource(issuer);
+  return {
+    grantType: String(form.get('grant_type') || '').slice(0, 64),
+    client: clientId === 'https://chatgpt.com/oauth/client.json'
+      ? 'ChatGPT CIMD'
+      : clientId.startsWith('https://chatgpt.com/oauth/')
+        ? 'ChatGPT CIMD con callback específico'
+        : clientId ? 'cliente OAuth registrado' : 'client_id ausente',
+    authMethod: detectTokenAuthMethod(req, form),
+    redirectUri: redirect || 'ausente/inválida',
+    resourceCount: resources.length,
+    resourceMatches: resources.length === 1 && timingSafeTextEqual(String(resources[0]).replace(/\/+$/, ''), expectedResource),
+    codePresent: Boolean(form.get('code')),
+    codeVerifierPresent: Boolean(form.get('code_verifier')),
+    codeVerifierLength: String(form.get('code_verifier') || '').length,
+    assertionPresent: Boolean(form.get('client_assertion')),
+    assertionTypePresent: Boolean(form.get('client_assertion_type'))
+  };
+}
+
 function htmlEscape(value) {
   return String(value || '')
     .replace(/&/g, '&amp;')
@@ -462,6 +525,10 @@ class OAuthProvider {
     this.cimdTimeoutMs = boundedNumber(options.cimdTimeoutMs || process.env.MCP_OAUTH_CIMD_TIMEOUT_MS, 5000, 1000, 15000);
     this.cimdMaxBytes = boundedNumber(options.cimdMaxBytes || process.env.MCP_OAUTH_CIMD_MAX_BYTES, 32768, 4096, 262144);
     this.cimdCacheTtl = boundedNumber(options.cimdCacheTtl || process.env.MCP_OAUTH_CIMD_CACHE_TTL, 21600, 60, 86400);
+    this.jwksFetcher = typeof options.jwksFetcher === 'function' ? options.jwksFetcher : this.cimdFetcher;
+    this.jwksCacheTtl = boundedNumber(options.jwksCacheTtl || process.env.MCP_OAUTH_JWKS_CACHE_TTL, 3600, 60, 21600);
+    this.jwksCache = new Map();
+    this.clientAssertionReplay = new Map();
     this.loginLimiter = new SlidingWindowLimiter(5, 600, 900);
     this.registrationLimiter = new SlidingWindowLimiter(20, 3600, 3600);
     this.authorizationLimiter = new SlidingWindowLimiter(60, 600, 600);
@@ -502,8 +569,8 @@ class OAuthProvider {
       response_types_supported: ['code'],
       response_modes_supported: ['query'],
       grant_types_supported: ['authorization_code', 'refresh_token'],
-      token_endpoint_auth_methods_supported: ['none', 'client_secret_basic', 'client_secret_post'],
-      revocation_endpoint_auth_methods_supported: ['none', 'client_secret_basic', 'client_secret_post'],
+      token_endpoint_auth_methods_supported: ['none', 'private_key_jwt', 'client_secret_basic', 'client_secret_post'],
+      revocation_endpoint_auth_methods_supported: ['none', 'private_key_jwt', 'client_secret_basic', 'client_secret_post'],
       code_challenge_methods_supported: ['S256'],
       authorization_response_iss_parameter_supported: true,
       resource_indicators_supported: true,
@@ -628,7 +695,7 @@ class OAuthProvider {
     }
 
     if (pathname === '/oauth/revoke' && req.method === 'POST') {
-      await this.handleRevoke(req, res);
+      await this.handleRevoke(req, res, issuer);
       return true;
     }
 
@@ -794,7 +861,11 @@ ${this.accessRiskNotice()}
     if (!cimdUrl) return existing || null;
 
     const now = nowSeconds();
-    if (existing && Number(existing.cimdValidatedAt || 0) + this.cimdCacheTtl > now) {
+    const cacheHasCurrentAuthMetadata = existing
+      && Array.isArray(existing.tokenEndpointAuthMethods)
+      && existing.tokenEndpointAuthMethods.length > 0
+      && (!existing.tokenEndpointAuthMethods.includes('private_key_jwt') || Boolean(existing.jwksUri));
+    if (cacheHasCurrentAuthMetadata && Number(existing.cimdValidatedAt || 0) + this.cimdCacheTtl > now) {
       if (!redirectUri || existing.redirectUris.includes(redirectUri)) return existing;
     }
 
@@ -831,10 +902,22 @@ ${this.accessRiskNotice()}
       throw new OAuthError('unauthorized_client', 'El documento CIMD declara response_types no compatibles.');
     }
     const clientMethods = Array.isArray(metadata.token_endpoint_auth_methods_supported)
-      ? metadata.token_endpoint_auth_methods_supported.map(String)
+      ? [...new Set(metadata.token_endpoint_auth_methods_supported.map(String))]
       : [String(metadata.token_endpoint_auth_method || 'none')];
-    if (!clientMethods.includes('none')) {
-      throw new OAuthError('unauthorized_client', 'Este servidor requiere que el cliente CIMD permita token_endpoint_auth_method=none.');
+    const supportedClientMethods = clientMethods.filter((method) => ['none', 'private_key_jwt'].includes(method));
+    if (supportedClientMethods.length === 0) {
+      throw new OAuthError('unauthorized_client', 'El cliente CIMD no comparte un método de autenticación de token compatible.');
+    }
+    const clientOrigin = new URL(cimdUrl).origin;
+    const jwksUri = clientMethods.includes('private_key_jwt')
+      ? validateSameOriginHttpsUrl(metadata.jwks_uri, clientOrigin)
+      : '';
+    if (clientMethods.includes('private_key_jwt') && !jwksUri) {
+      throw new OAuthError('unauthorized_client', 'El cliente CIMD anuncia private_key_jwt pero no publica un jwks_uri HTTPS válido en su mismo origen.');
+    }
+    const signingAlg = String(metadata.token_endpoint_auth_signing_alg || 'RS256');
+    if (clientMethods.includes('private_key_jwt') && signingAlg !== 'RS256') {
+      throw new OAuthError('unauthorized_client', 'El servidor sólo admite RS256 para private_key_jwt.');
     }
 
     if (!existing && Object.keys(this.store.state.clients).length >= this.maxClients) {
@@ -850,7 +933,12 @@ ${this.accessRiskNotice()}
       redirectUris,
       grantTypes,
       responseTypes,
-      tokenEndpointAuthMethod: 'none',
+      tokenEndpointAuthMethod: supportedClientMethods.includes(String(metadata.token_endpoint_auth_method || ''))
+        ? String(metadata.token_endpoint_auth_method)
+        : supportedClientMethods.includes('none') ? 'none' : supportedClientMethods[0],
+      tokenEndpointAuthMethods: supportedClientMethods,
+      tokenEndpointAuthSigningAlg: signingAlg,
+      jwksUri,
       clientSecretHash: '',
       applicationType: 'web',
       scope: `${DEFAULT_SCOPE} ${OFFLINE_SCOPE}`,
@@ -1038,9 +1126,106 @@ ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
     }
   }
 
-  async authenticateClient(req, form) {
+  pruneAssertionReplay(now = nowSeconds()) {
+    for (const [key, expiresAt] of this.clientAssertionReplay) {
+      if (Number(expiresAt || 0) <= now) this.clientAssertionReplay.delete(key);
+    }
+    if (this.clientAssertionReplay.size > 4096) {
+      const overflow = [...this.clientAssertionReplay.entries()]
+        .sort((left, right) => Number(left[1]) - Number(right[1]))
+        .slice(0, this.clientAssertionReplay.size - 4096);
+      for (const [key] of overflow) this.clientAssertionReplay.delete(key);
+    }
+  }
+
+  async loadClientJwks(client, { force = false } = {}) {
+    if (!client.jwksUri) throw new OAuthError('invalid_client', 'El cliente no publica JWKS para private_key_jwt.', 401);
+    const now = nowSeconds();
+    const cached = this.jwksCache.get(client.jwksUri);
+    if (!force && cached && Number(cached.expiresAt || 0) > now) return cached.jwks;
+    let jwks;
+    try {
+      jwks = await this.jwksFetcher(client.jwksUri, { timeoutMs: this.cimdTimeoutMs, maxBytes: this.cimdMaxBytes });
+    } catch (error) {
+      humanEvent('SEGURIDAD', `No se pudo obtener el JWKS del cliente OAuth: ${redactText(error.message)}`);
+      throw new OAuthError('invalid_client', 'No se pudo verificar la firma del cliente OAuth.', 401);
+    }
+    if (!jwks || !Array.isArray(jwks.keys) || jwks.keys.length < 1 || jwks.keys.length > 50) {
+      throw new OAuthError('invalid_client', 'El JWKS del cliente OAuth no es válido.', 401);
+    }
+    this.jwksCache.set(client.jwksUri, { jwks, expiresAt: now + this.jwksCacheTtl });
+    return jwks;
+  }
+
+  async verifyPrivateKeyJwt(client, assertion, issuer) {
+    const raw = String(assertion || '');
+    if (raw.length < 100 || raw.length > 16384) throw new OAuthError('invalid_client', 'La aserción private_key_jwt no tiene un tamaño válido.', 401);
+    const parts = raw.split('.');
+    if (parts.length !== 3 || parts.some((part) => !part)) throw new OAuthError('invalid_client', 'La aserción private_key_jwt no tiene formato JWT.', 401);
+    const header = decodeJwtPart(parts[0], 'encabezado');
+    const claims = decodeJwtPart(parts[1], 'payload');
+    if (header.alg !== 'RS256' || !header.kid || typeof header.kid !== 'string' || header.kid.length > 256) {
+      throw new OAuthError('invalid_client', 'La aserción private_key_jwt debe usar RS256 y un kid válido.', 401);
+    }
+    if (!timingSafeTextEqual(String(claims.iss || ''), client.clientId)
+        || !timingSafeTextEqual(String(claims.sub || ''), client.clientId)) {
+      throw new OAuthError('invalid_client', 'La identidad de la aserción private_key_jwt no coincide con client_id.', 401);
+    }
+    const tokenEndpoint = `${normalizeBaseUrl(issuer)}/oauth/token`;
+    if (!jwtAudienceMatches(claims.aud, [tokenEndpoint, normalizeBaseUrl(issuer)])) {
+      throw new OAuthError('invalid_client', 'La audiencia de private_key_jwt no corresponde a este token endpoint.', 401);
+    }
+    const now = nowSeconds();
+    const exp = Number(claims.exp || 0);
+    const iat = Number(claims.iat || 0);
+    const nbf = claims.nbf === undefined ? 0 : Number(claims.nbf);
+    if (!Number.isFinite(exp) || exp <= now - 30 || exp > now + 600) {
+      throw new OAuthError('invalid_client', 'La aserción private_key_jwt está vencida o tiene una expiración inválida.', 401);
+    }
+    if (iat && (!Number.isFinite(iat) || iat > now + 60 || iat < now - 600)) {
+      throw new OAuthError('invalid_client', 'La fecha de emisión de private_key_jwt no es válida.', 401);
+    }
+    if (nbf && (!Number.isFinite(nbf) || nbf > now + 60)) {
+      throw new OAuthError('invalid_client', 'La aserción private_key_jwt todavía no es válida.', 401);
+    }
+    let jwks = await this.loadClientJwks(client);
+    const matchingKeys = (document) => document.keys.filter((jwk) => jwk && jwk.kid === header.kid && jwk.kty === 'RSA'
+      && (!jwk.use || jwk.use === 'sig') && (!jwk.alg || jwk.alg === 'RS256'));
+    let candidates = matchingKeys(jwks);
+    if (candidates.length === 0) {
+      jwks = await this.loadClientJwks(client, { force: true });
+      candidates = matchingKeys(jwks);
+    }
+    if (candidates.length !== 1) throw new OAuthError('invalid_client', 'No se encontró una clave pública única para private_key_jwt.', 401);
+    let publicKey;
+    try { publicKey = crypto.createPublicKey({ key: candidates[0], format: 'jwk' }); }
+    catch (_) { throw new OAuthError('invalid_client', 'La clave pública private_key_jwt no es válida.', 401); }
+    let signature;
+    try { signature = Buffer.from(parts[2], 'base64url'); }
+    catch (_) { throw new OAuthError('invalid_client', 'La firma private_key_jwt no es válida.', 401); }
+    const verified = crypto.verify('RSA-SHA256', Buffer.from(`${parts[0]}.${parts[1]}`, 'ascii'), publicKey, signature);
+    if (!verified) throw new OAuthError('invalid_client', 'La firma private_key_jwt no pudo verificarse.', 401);
+
+    this.pruneAssertionReplay(now);
+    const replayKey = tokenHash(claims.jti ? `${client.clientId}:${claims.jti}` : raw);
+    if (this.clientAssertionReplay.has(replayKey)) throw new OAuthError('invalid_client', 'La aserción private_key_jwt ya fue utilizada.', 401);
+    this.clientAssertionReplay.set(replayKey, exp);
+    return true;
+  }
+
+  async authenticateClient(req, form, issuer) {
     let clientId = String(form.get('client_id') || '');
     let secret = String(form.get('client_secret') || '');
+    if (!clientId && form.get('client_assertion')) {
+      const parts = String(form.get('client_assertion')).split('.');
+      if (parts.length === 3) {
+        try {
+          const claims = decodeJwtPart(parts[1], 'payload');
+          const assertedClientId = String(claims.iss || '');
+          if (validateCimdClientId(assertedClientId, this.cimdHosts)) clientId = assertedClientId;
+        } catch (_) {}
+      }
+    }
     const authorization = String(req.headers.authorization || '');
     if (authorization.startsWith('Basic ')) {
       try {
@@ -1055,12 +1240,35 @@ ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
 
     const client = await this.resolveClient(clientId, { redirectUri: String(form.get('redirect_uri') || '') });
     if (!client) throw new OAuthError('invalid_client', 'Cliente OAuth desconocido. Si ChatGPT reutiliza un client_id DCR anterior, eliminá y recreá la app.', 401);
-    if (client.tokenEndpointAuthMethod !== 'none') {
+    const actualMethod = detectTokenAuthMethod(req, form);
+    if (client.registrationType === 'cimd') {
+      const allowedMethods = Array.isArray(client.tokenEndpointAuthMethods) && client.tokenEndpointAuthMethods.length
+        ? client.tokenEndpointAuthMethods
+        : [client.tokenEndpointAuthMethod || 'none'];
+      if (!allowedMethods.includes(actualMethod)) {
+        throw new OAuthError('invalid_client', `El método ${actualMethod} no está permitido por el documento CIMD.`, 401);
+      }
+      if (actualMethod === 'private_key_jwt') {
+        if (String(form.get('client_assertion_type') || '') !== CLIENT_ASSERTION_TYPE) {
+          throw new OAuthError('invalid_client', 'client_assertion_type no corresponde a private_key_jwt.', 401);
+        }
+        await this.verifyPrivateKeyJwt(client, String(form.get('client_assertion') || ''), issuer);
+      } else if (actualMethod !== 'none') {
+        throw new OAuthError('invalid_client', 'El cliente CIMD no usa secretos compartidos.', 401);
+      }
+      return { ...client, authenticatedWith: actualMethod };
+    }
+    if (client.tokenEndpointAuthMethod === 'none') {
+      if (actualMethod !== 'none') throw new OAuthError('invalid_client', 'Este cliente OAuth está registrado como público.', 401);
+    } else {
       if (!secret || !timingSafeTextEqual(tokenHash(secret), client.clientSecretHash)) {
         throw new OAuthError('invalid_client', 'El secreto del cliente no es válido.', 401);
       }
+      if (actualMethod !== client.tokenEndpointAuthMethod) {
+        throw new OAuthError('invalid_client', 'El método de autenticación del cliente no coincide con su registro.', 401);
+      }
     }
-    return client;
+    return { ...client, authenticatedWith: actualMethod };
   }
 
   async handleToken(req, res, issuer) {
@@ -1071,10 +1279,13 @@ ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
       return;
     }
 
+    let summary = { grantType: 'desconocido', client: 'desconocido', authMethod: 'desconocido' };
     try {
       const form = await readForm(req, 64 * 1024);
+      summary = safeTokenRequestSummary(req, form, issuer);
+      humanEvent('OAUTH', `Solicitud al token endpoint desde ${ip}: grant=${summary.grantType || 'ausente'}, cliente=${summary.client}, autenticación=${summary.authMethod}, resource=${summary.resourceMatches ? 'correcto' : `no coincide (${summary.resourceCount})`}, PKCE=${summary.codeVerifierPresent ? `${summary.codeVerifierLength} caracteres` : 'ausente'}.`);
       this.refreshStore();
-      const client = await this.authenticateClient(req, form);
+      const client = await this.authenticateClient(req, form, issuer);
       const grantType = String(form.get('grant_type') || '');
       let response;
       if (grantType === 'authorization_code') {
@@ -1085,10 +1296,13 @@ ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
         throw new OAuthError('unsupported_grant_type', 'Sólo se admiten authorization_code y refresh_token.');
       }
       this.tokenLimiter.clear(ip);
+      humanEvent('OAUTH', `Token OAuth emitido correctamente para ${client.clientName} mediante ${client.authenticatedWith || client.tokenEndpointAuthMethod || 'método registrado'}.`);
       sendJson(res, 200, response);
     } catch (error) {
       this.tokenLimiter.recordFailure(ip);
-      this.sendOAuthError(res, error);
+      const code = error instanceof OAuthError ? error.code : 'server_error';
+      humanEvent('SEGURIDAD', `Falló el token exchange desde ${ip}: ${code} - ${redactText(error.message || error)}. grant=${summary.grantType}, cliente=${summary.client}, autenticación=${summary.authMethod}, resource=${summary.resourceMatches ? 'correcto' : 'incorrecto/ausente'}, PKCE=${summary.codeVerifierPresent ? `${summary.codeVerifierLength} caracteres` : 'ausente'}.`);
+      this.sendOAuthError(res, error, false, { authMethod: summary.authMethod });
     }
   }
 
@@ -1221,11 +1435,11 @@ ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
     }
   }
 
-  async handleRevoke(req, res) {
+  async handleRevoke(req, res, issuer) {
     try {
       const form = await readForm(req, 64 * 1024);
       this.refreshStore();
-      const client = this.authenticateClient(req, form);
+      const client = await this.authenticateClient(req, form, issuer);
       const key = tokenHash(String(form.get('token') || ''));
       const access = this.store.state.accessTokens[key];
       const refresh = this.store.state.refreshTokens[key];
@@ -1245,7 +1459,7 @@ ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
     }
   }
 
-  sendOAuthError(res, error, html = false) {
+  sendOAuthError(res, error, html = false, options = {}) {
     const oauthError = error instanceof OAuthError
       ? error
       : new OAuthError('server_error', 'No se pudo completar la autorización.', 500);
@@ -1255,7 +1469,9 @@ ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
     if (html) {
       sendHtml(res, oauthError.statusCode, `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Error OAuth</title></head><body><h1>No se pudo autorizar</h1><p>${htmlEscape(oauthError.message)}</p><p>Volvé a ChatGPT e intentá conectar el servidor nuevamente.</p></body></html>`);
     } else {
-      const headers = oauthError.code === 'invalid_client' ? { 'www-authenticate': 'Basic realm="MCP OAuth token endpoint"' } : {};
+      const headers = oauthError.code === 'invalid_client' && options.authMethod === 'client_secret_basic'
+        ? { 'www-authenticate': 'Basic realm="MCP OAuth token endpoint"' }
+        : {};
       sendJson(res, oauthError.statusCode, { error: oauthError.code, error_description: oauthError.message }, headers);
     }
   }

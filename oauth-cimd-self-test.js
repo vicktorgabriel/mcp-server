@@ -41,12 +41,15 @@ async function main() {
     const metadata = provider.metadata('https://mcp.example.test');
     assert.equal(metadata.client_id_metadata_document_supported, true);
     assert.ok(metadata.token_endpoint_auth_methods_supported.includes('none'));
+    assert.ok(metadata.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
     assert.ok(metadata.registration_endpoint.endsWith('/oauth/register'), 'DCR must remain available as fallback');
 
     const resolved = await provider.resolveClient(clientId, { redirectUri });
     assert.equal(resolved.clientName, 'ChatGPT');
     assert.equal(resolved.registrationType, 'cimd');
-    assert.equal(resolved.tokenEndpointAuthMethod, 'none');
+    assert.equal(resolved.tokenEndpointAuthMethod, 'private_key_jwt');
+    assert.deepEqual(resolved.tokenEndpointAuthMethods, ['none', 'private_key_jwt']);
+    assert.equal(resolved.jwksUri, 'https://chatgpt.com/oauth/jwks.json');
     assert.deepEqual(resolved.redirectUris, [redirectUri]);
     assert.equal(fetches, 1);
 
@@ -74,7 +77,7 @@ async function main() {
     const tokenForm = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri });
     const tokenClient = await provider.authenticateClient({ headers: {} }, tokenForm);
     assert.equal(tokenClient.clientId, clientId);
-    assert.equal(tokenClient.tokenEndpointAuthMethod, 'none');
+    assert.equal(tokenClient.authenticatedWith, 'none');
 
     assert.equal(await provider.resolveClient('https://evil.example/oauth/client.json', { redirectUri }), null);
 
@@ -86,6 +89,37 @@ async function main() {
     });
     assert.equal(await unsafeHostProvider.resolveClient('https://127.0.0.1/oauth/client.json', { redirectUri }), null);
     assert.equal(await unsafeHostProvider.resolveClient('https://localhost/oauth/client.json', { redirectUri }), null);
+
+    const legacyStorePath = path.join(temp, 'legacy-cimd.json');
+    const legacyStore = new OAuthStateStore(legacyStorePath);
+    legacyStore.state.clients[clientId] = {
+      clientId,
+      clientName: 'ChatGPT',
+      redirectUris: [redirectUri],
+      grantTypes: ['authorization_code', 'refresh_token'],
+      responseTypes: ['code'],
+      tokenEndpointAuthMethod: 'none',
+      clientSecretHash: '',
+      applicationType: 'web',
+      scope: 'mcp:tools offline_access',
+      registrationType: 'cimd',
+      cimdMetadataUrl: clientId,
+      cimdValidatedAt: Math.floor(Date.now() / 1000),
+      issuedAt: Math.floor(Date.now() / 1000),
+      createdAt: new Date().toISOString()
+    };
+    legacyStore.save();
+    let legacyRefreshes = 0;
+    const migrationProvider = new OAuthProvider({
+      storePath: legacyStorePath,
+      cimdEnabled: true,
+      cimdHosts: new Set(['chatgpt.com']),
+      cimdFetcher: async () => { legacyRefreshes += 1; return { ...document }; }
+    });
+    const migrated = await migrationProvider.resolveClient(clientId, { redirectUri });
+    assert.equal(legacyRefreshes, 1, 'a 4.3-era CIMD record must refresh immediately after upgrading');
+    assert.ok(migrated.tokenEndpointAuthMethods.includes('private_key_jwt'));
+    assert.equal(migrated.jwksUri, document.jwks_uri);
 
     const badRedirectProvider = new OAuthProvider({
       storePath: path.join(temp, 'bad-redirect.json'),
@@ -118,10 +152,9 @@ async function main() {
         token_endpoint_auth_methods_supported: ['private_key_jwt']
       })
     });
-    await assert.rejects(
-      () => privateOnlyProvider.resolveClient(clientId, { redirectUri }),
-      /method=none/i
-    );
+    const privateOnly = await privateOnlyProvider.resolveClient(clientId, { redirectUri });
+    assert.deepEqual(privateOnly.tokenEndpointAuthMethods, ['private_key_jwt']);
+    assert.equal(privateOnly.tokenEndpointAuthMethod, 'private_key_jwt');
 
     process.stdout.write('oauth_cimd=OK\n');
   } finally {
