@@ -396,6 +396,9 @@ class OAuthProvider {
     this.tokenLimiter = new SlidingWindowLimiter(60, 600, 600);
     this.maxClients = Number(options.maxClients || 200);
     this.maxTransactions = Number(options.maxTransactions || 1000);
+    this.accessSummary = options.accessSummary && typeof options.accessSummary === 'object'
+      ? options.accessSummary
+      : { profile: 'unknown', label: 'No informado', allowedToolCount: 0, warnings: [] };
     this.store.cleanup();
   }
 
@@ -564,6 +567,7 @@ class OAuthProvider {
 <style>body{font-family:system-ui,sans-serif;max-width:720px;margin:4rem auto;padding:0 1.2rem;color:#18212b}code{background:#eef2f6;padding:.15rem .35rem;border-radius:.3rem}h1{font-size:1.7rem}</style></head>
 <body><h1>Autenticación OAuth del servidor MCP</h1><p>Este servidor usa OAuth 2.1 con autorización por código, PKCE S256 y refresh tokens.</p>
 <p>Endpoint MCP: <code>${htmlEscape(`${issuer}/mcp`)}</code></p>
+<p>Perfil publicado: <strong>${htmlEscape(this.accessSummary.label || this.accessSummary.profile)}</strong> (${Number(this.accessSummary.allowedToolCount || 0)} herramientas).</p>
 <p>Agregalo desde ChatGPT en modo desarrollador y elegí OAuth. ChatGPT descubrirá automáticamente estos endpoints.</p></body></html>`;
   }
 
@@ -780,7 +784,7 @@ class OAuthProvider {
 <style>body{font-family:system-ui,sans-serif;background:#f4f7fb;margin:0;color:#15202b}.card{max-width:520px;margin:7vh auto;background:white;border-radius:16px;padding:28px;box-shadow:0 12px 40px #10243a22}h1{font-size:1.45rem;margin-top:0}.muted{color:#5d6975;font-size:.94rem}.notice{background:#eef6ff;border:1px solid #bddbff;padding:12px;border-radius:10px;margin:16px 0}.error{background:#fff1f1;border:1px solid #e5a8a8;color:#8b1c1c;padding:10px;border-radius:8px}label{display:block;margin-top:14px;font-weight:600}input{box-sizing:border-box;width:100%;padding:11px;margin-top:5px;border:1px solid #bac5d0;border-radius:8px;font-size:1rem}.actions{display:flex;gap:10px;margin-top:22px}.primary,.deny{border:0;border-radius:8px;padding:11px 15px;font-size:1rem;cursor:pointer}.primary{background:#1769e0;color:white;flex:1}.deny{background:#e9edf2;color:#26323d}</style></head>
 <body><main class="card"><h1>Autorizar acceso al servidor MCP</h1>
 <p><strong>${htmlEscape(client.clientName)}</strong> solicita usar las herramientas configuradas en este equipo.</p>
-<div class="notice"><strong>Destino de retorno:</strong> ${htmlEscape(redirectHost)}<br><strong>Permiso:</strong> ejecutar las herramientas MCP habilitadas.</div>
+<div class="notice"><strong>Destino de retorno:</strong> ${htmlEscape(redirectHost)}<br><strong>Perfil autorizado:</strong> ${htmlEscape(this.accessSummary.label || this.accessSummary.profile)}<br><strong>Herramientas publicadas:</strong> ${Number(this.accessSummary.allowedToolCount || 0)}</div>
 <p class="muted">Autorizá únicamente si vos acabás de agregar este servidor en ChatGPT y reconocés el destino mostrado.</p>
 ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
 <form method="post" action="/oauth/authorize"><input type="hidden" name="transaction" value="${htmlEscape(transactionId)}">

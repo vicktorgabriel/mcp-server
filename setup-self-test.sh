@@ -81,6 +81,7 @@ OUTPUT="$TEST_ROOT/setup.out"
   MCP_SETUP_PORT="$MCP_PORT" \
   MCP_SETUP_ACCESS_CHOICE=1 \
   MCP_SETUP_ALLOWED_PATHS="$TEST_ROOT/allowed" \
+  MCP_SETUP_PROFILE_CHOICE=2 \
   MCP_SETUP_MODE_CHOICE=1 \
   MCP_SETUP_NGROK_TOKEN="$TOKEN" \
   MCP_SETUP_NGROK_URL='https://example-device.ngrok.dev' \
@@ -101,6 +102,10 @@ grep -Fxq 'MCP_EXPOSURE_MODE=ngrok' "$ENV_FILE"
 grep -Fxq 'NGROK_URL=https://example-device.ngrok.dev' "$ENV_FILE"
 grep -Fxq 'MCP_PUBLIC_BASE_URL=https://example-device.ngrok.dev' "$ENV_FILE"
 grep -Fxq 'MCP_AUTH_MODE=oauth' "$ENV_FILE"
+grep -Fxq 'MCP_ACCESS_PROFILE=developer' "$ENV_FILE"
+grep -Fxq 'MCP_ACCESS_GROUPS=' "$ENV_FILE"
+grep -Fxq 'MCP_DESKTOP_ENABLED=1' "$ENV_FILE"
+grep -Fxq 'MCP_INPUT_ENABLED=0' "$ENV_FILE"
 grep -Fxq 'MCP_AUTH_TOKEN=' "$ENV_FILE"
 grep -q "^NGROK_BIN=$TEST_ROOT/bin/ngrok$" "$ENV_FILE"
 grep -Fxq 'NGROK_CONFIG=.private/ngrok.yml' "$ENV_FILE"
@@ -144,6 +149,7 @@ DIRECT_OUTPUT="$TEST_ROOT/direct.out"
   MCP_SETUP_PORT=43123 \
   MCP_SETUP_ACCESS_CHOICE=1 \
   MCP_SETUP_ALLOWED_PATHS="$TEST_ROOT/direct-allowed" \
+  MCP_SETUP_PROFILE_CHOICE=2 \
   MCP_SETUP_MODE_CHOICE=2 \
   MCP_SETUP_PUBLIC_IP=198.51.100.10 \
   MCP_SETUP_DIRECT_URL=https://direct-device.example \
@@ -159,6 +165,7 @@ grep -Fxq 'MCP_EXPOSURE_MODE=direct' "$DIRECT_ENV"
 grep -Fxq 'PUBLIC_BASE_URL=https://direct-device.example' "$DIRECT_ENV"
 grep -Fxq 'MCP_PUBLIC_BASE_URL=https://direct-device.example' "$DIRECT_ENV"
 grep -Fxq 'MCP_AUTH_MODE=bearer' "$DIRECT_ENV"
+grep -Fxq 'MCP_ACCESS_PROFILE=developer' "$DIRECT_ENV"
 grep -Fxq 'MCP_AUTH_TOKEN=' "$DIRECT_ENV"
 grep -Fxq 'MCP_AUTH_TOKEN_FILE=.private/bearer-token.txt' "$DIRECT_ENV"
 DIRECT_TOKEN="$(cat "$DIRECT_PRIVATE/bearer-token.txt")"
@@ -166,6 +173,63 @@ DIRECT_TOKEN="$(cat "$DIRECT_PRIVATE/bearer-token.txt")"
 ! grep -Fq "$DIRECT_TOKEN" "$DIRECT_ENV"
 ! grep -Fq "$DIRECT_TOKEN" "$DIRECT_OUTPUT"
 echo 'first_run_direct_bearer=OK'
+
+printf '\n== access-only reconfiguration preserves connection/auth ==\n'
+DIRECT_TOKEN_BEFORE="$(cat "$DIRECT_PRIVATE/bearer-token.txt")"
+(
+  cd "$TEST_ROOT/direct-repo"
+  MCP_SETUP_NONINTERACTIVE=1 \
+  MCP_SETUP_PROFILE_CHOICE=1 \
+  MCP_SETUP_TOOL_DENYLIST='' \
+  MCP_SERVICE_NAME=mcp-access-only-test.service ./mcpctl.sh permissions-set >"$TEST_ROOT/access-only.out" 2>&1
+)
+grep -Fxq 'MCP_ACCESS_PROFILE=read_only' "$DIRECT_ENV"
+grep -Fxq 'MCP_AUTH_MODE=bearer' "$DIRECT_ENV"
+grep -Fxq 'MCP_PUBLIC_BASE_URL=https://direct-device.example' "$DIRECT_ENV"
+[ "$(cat "$DIRECT_PRIVATE/bearer-token.txt")" = "$DIRECT_TOKEN_BEFORE" ]
+! grep -Fq "$DIRECT_TOKEN_BEFORE" "$TEST_ROOT/access-only.out"
+echo 'access_only_reconfigure=OK'
+
+printf '\n== custom tool profile ==\n'
+mkdir -p "$TEST_ROOT/custom-repo" "$TEST_ROOT/custom-allowed"
+cp -a . "$TEST_ROOT/custom-repo/"
+rm -rf "$TEST_ROOT/custom-repo/.git" "$TEST_ROOT/custom-repo/.env" "$TEST_ROOT/custom-repo/.private" "$TEST_ROOT/custom-repo/.runtime"
+(
+  cd "$TEST_ROOT/custom-repo"
+  MCP_SETUP_NONINTERACTIVE=1 \
+  MCP_SETUP_PORT=43125 \
+  MCP_SETUP_ACCESS_CHOICE=1 \
+  MCP_SETUP_ALLOWED_PATHS="$TEST_ROOT/custom-allowed" \
+  MCP_SETUP_PROFILE_CHOICE=5 \
+  MCP_SETUP_ACCESS_GROUPS='diagnostics,files_read,files_write,desktop_view' \
+  MCP_SETUP_TOOL_DENYLIST='write_file' \
+  MCP_SETUP_MODE_CHOICE=3 \
+  ./configure-mcp.sh >"$TEST_ROOT/custom.out" 2>&1
+)
+CUSTOM_ENV="$TEST_ROOT/custom-repo/.env"
+grep -Fxq 'MCP_ACCESS_PROFILE=custom' "$CUSTOM_ENV"
+grep -Fxq 'MCP_ACCESS_GROUPS=diagnostics,files_read,files_write,desktop_view' "$CUSTOM_ENV"
+grep -Fxq 'MCP_TOOL_DENYLIST=write_file' "$CUSTOM_ENV"
+grep -Fxq 'MCP_DESKTOP_ENABLED=1' "$CUSTOM_ENV"
+grep -Fxq 'MCP_INPUT_ENABLED=0' "$CUSTOM_ENV"
+CUSTOM_TOOLS="$(
+  cd "$TEST_ROOT/custom-repo"
+  env -i HOME="$HOME" USER="$(id -un)" PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    node - <<'NODE'
+const { spawnSync } = require('child_process');
+const request={jsonrpc:'2.0',id:1,method:'tools/list',params:{}};
+const result=spawnSync(process.execPath,['mcp-server.js','--stdio'],{input:JSON.stringify(request)+'\n',encoding:'utf8'});
+if(result.status!==0){process.stderr.write(result.stderr);process.exit(result.status||1)}
+const names=JSON.parse(result.stdout.trim()).result.tools.map((tool)=>tool.name);
+process.stdout.write(names.join('\n'));
+NODE
+)"
+grep -Fxq 'tool_policy_status' <<<"$CUSTOM_TOOLS"
+grep -Fxq 'read_file' <<<"$CUSTOM_TOOLS"
+grep -Fxq 'patch_file' <<<"$CUSTOM_TOOLS"
+! grep -Fxq 'write_file' <<<"$CUSTOM_TOOLS"
+! grep -Fxq 'run_command' <<<"$CUSTOM_TOOLS"
+echo 'custom_tool_profile=OK'
 
 printf '\n== legacy configuration migration ==\n'
 mkdir -p "$TEST_ROOT/legacy-repo" "$TEST_ROOT/legacy-allowed" "$TEST_ROOT/legacy-private"
@@ -197,14 +261,45 @@ LEGACY_OUTPUT="$TEST_ROOT/legacy.out"
 )
 LEGACY_ENV="$TEST_ROOT/legacy-repo/.env"
 grep -Fxq 'MCP_SETUP_COMPLETE=1' "$LEGACY_ENV"
-grep -Fxq 'MCP_SETUP_VERSION=4' "$LEGACY_ENV"
+grep -Fxq 'MCP_SETUP_VERSION=5' "$LEGACY_ENV"
 grep -Fxq 'MCP_AUTH_MODE=none' "$LEGACY_ENV"
+grep -Fxq 'MCP_ACCESS_PROFILE=full' "$LEGACY_ENV"
 grep -Fxq 'MCP_AUTH_TOKEN_FILE=.private/bearer-token.txt' "$LEGACY_ENV"
 grep -Fxq 'MCP_ALLOW_UNSAFE_NO_AUTH=1' "$LEGACY_ENV"
 grep -Fxq 'MCP_PUBLIC_BASE_URL=https://legacy-device.example' "$LEGACY_ENV"
 grep -Fxq "ALLOWED_PATHS=$TEST_ROOT/legacy-allowed" "$LEGACY_ENV"
 ! grep -q 'ASISTENTE INICIAL' "$LEGACY_OUTPUT"
 echo 'legacy_migration=OK'
+
+printf '\n== v4 incremental access-profile migration ==\n'
+mkdir -p "$TEST_ROOT/v4-repo" "$TEST_ROOT/v4-allowed"
+cp -a . "$TEST_ROOT/v4-repo/"
+rm -rf "$TEST_ROOT/v4-repo/.git" "$TEST_ROOT/v4-repo/.env" "$TEST_ROOT/v4-repo/.private" "$TEST_ROOT/v4-repo/.runtime"
+cat >"$TEST_ROOT/v4-repo/.env" <<EOF_V4
+MCP_SETUP_COMPLETE=1
+MCP_SETUP_VERSION=4
+PORT=43126
+HOST=127.0.0.1
+ALLOWED_PATHS=$TEST_ROOT/v4-allowed
+WORKING_DIR=$TEST_ROOT/v4-allowed
+MCP_FULL_ACCESS=0
+MCP_EXPOSURE_MODE=local
+MCP_PUBLIC_BASE_URL=
+MCP_AUTH_MODE=none
+MCP_AUTH_TOKEN=
+MCP_ALLOW_UNSAFE_NO_AUTH=0
+EOF_V4
+chmod 600 "$TEST_ROOT/v4-repo/.env"
+(
+  cd "$TEST_ROOT/v4-repo"
+  env -i HOME="$HOME" USER="$(id -un)" \
+    PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    MCP_INSTALL_OPTIONAL=0 MCP_SETUP_QUIET=1 ./setup-mcp.sh >"$TEST_ROOT/v4.out" 2>&1
+)
+grep -Fxq 'MCP_SETUP_VERSION=5' "$TEST_ROOT/v4-repo/.env"
+grep -Fxq 'MCP_ACCESS_PROFILE=full' "$TEST_ROOT/v4-repo/.env"
+! grep -q 'ASISTENTE INICIAL' "$TEST_ROOT/v4.out"
+echo 'v4_access_profile_migration=OK'
 
 printf '\n== configure refuses an active temporary runtime ==\n'
 mkdir -p "$TEST_ROOT/active-repo" "$TEST_ROOT/active-allowed"
@@ -217,12 +312,13 @@ PY
 )"
 cat >"$TEST_ROOT/active-repo/.env" <<EOF_ACTIVE
 MCP_SETUP_COMPLETE=1
-MCP_SETUP_VERSION=4
+MCP_SETUP_VERSION=5
 PORT=$ACTIVE_PORT
 HOST=127.0.0.1
 ALLOWED_PATHS=$TEST_ROOT/active-allowed
 WORKING_DIR=$TEST_ROOT/active-allowed
 MCP_FULL_ACCESS=0
+MCP_ACCESS_PROFILE=developer
 MCP_EXPOSURE_MODE=local
 MCP_PUBLIC_BASE_URL=
 MCP_AUTH_MODE=none
@@ -297,6 +393,7 @@ if (
   MCP_SETUP_PORT=43124 \
   MCP_SETUP_ACCESS_CHOICE=1 \
   MCP_SETUP_ALLOWED_PATHS="$TEST_ROOT/http-allowed" \
+  MCP_SETUP_PROFILE_CHOICE=2 \
   MCP_SETUP_MODE_CHOICE=2 \
   MCP_SETUP_DIRECT_URL=198.51.100.10:43124 \
   MCP_SETUP_OPEN_FIREWALL=2 \
@@ -315,6 +412,7 @@ rm -rf "$TEST_ROOT/http-repo/.private" "$TEST_ROOT/http-repo/.runtime"
   MCP_SETUP_PORT=43124 \
   MCP_SETUP_ACCESS_CHOICE=1 \
   MCP_SETUP_ALLOWED_PATHS="$TEST_ROOT/http-allowed" \
+  MCP_SETUP_PROFILE_CHOICE=2 \
   MCP_SETUP_MODE_CHOICE=2 \
   MCP_SETUP_DIRECT_URL=198.51.100.10:43124 \
   MCP_SETUP_OPEN_FIREWALL=2 \

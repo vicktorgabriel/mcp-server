@@ -472,6 +472,94 @@ configure_auth() {
   esac
 }
 
+configure_tool_access() {
+  local choice profile groups denylist
+  line
+  echo ' PERFIL DE HERRAMIENTAS'
+  line
+  echo 'Este perfil decide qué herramientas verá ChatGPT. No cambia los permisos del usuario del sistema.'
+  echo
+  echo '  1) SÓLO LECTURA Y OBSERVACIÓN'
+  echo '     Archivos, estado del sistema, Git/tmux de consulta, red y capturas de pantalla.'
+  echo '     No permite escribir, ejecutar comandos ni controlar teclado/mouse.'
+  echo
+  echo '  2) DESARROLLO (RECOMENDADO)'
+  echo '     Lectura/escritura de proyectos, comandos, Git, tmux, red, contenedores y pantalla.'
+  echo '     No publica cambios directos de servicios/firewall/montajes ni cámara/audio.'
+  echo
+  echo '  3) ADMINISTRACIÓN'
+  echo '     Desarrollo más servicios, procesos, paquetes, firewall, montajes, teclado/mouse, cámara y audio.'
+  echo '     No permite apagar o reiniciar el equipo mediante la herramienta dedicada.'
+  echo
+  echo '  4) CONTROL TOTAL'
+  echo '     Publica todas las herramientas, incluida energía. Las acciones críticas exigen confirmación.'
+  echo
+  echo '  5) PERSONALIZADO'
+  echo '     Elegís grupos y podés bloquear herramientas individuales.'
+  echo
+  choice="$(prompt_choice MCP_SETUP_PROFILE_CHOICE 'Perfil de herramientas' '2')"
+  case "$choice" in
+    1|read_only|readonly|lectura) profile='read_only'; groups='' ;;
+    2|developer|dev|desarrollo) profile='developer'; groups='' ;;
+    3|administrator|admin|administracion|administración) profile='administrator'; groups='' ;;
+    4|full|total|completo) profile='full'; groups='' ;;
+    5|custom|personalizado)
+      profile='custom'
+      echo
+      echo 'Grupos disponibles:'
+      node - <<'NODE'
+const { GROUPS } = require('./access-policy');
+for (const [name, description] of Object.entries(GROUPS)) console.log(`  ${name.padEnd(19)} ${description}`);
+NODE
+      echo 'Nota: git_write, tmux_write y containers necesitan command_execution para las acciones que ejecutan procesos.'
+      groups="$(prompt_text MCP_SETUP_ACCESS_GROUPS 'Grupos habilitados, separados por coma' 'diagnostics,files_read,system_read')"
+      node - "$groups" <<'NODE'
+const { GROUPS, parseCsv } = require('./access-policy');
+const unknown=parseCsv(process.argv[2]).filter((name)=>!Object.hasOwn(GROUPS,name));
+if(unknown.length){console.error(`Grupos desconocidos: ${unknown.join(', ')}`);process.exit(1)}
+if(!parseCsv(process.argv[2]).length){console.error('Elegí al menos un grupo.');process.exit(1)}
+NODE
+      ;;
+    *) err "Perfil no válido: $choice"; exit 2 ;;
+  esac
+
+  denylist="$(prompt_text MCP_SETUP_TOOL_DENYLIST 'Herramientas individuales a bloquear (opcional, separadas por coma)' "$(read_env MCP_TOOL_DENYLIST)")"
+  set_env \
+    "MCP_ACCESS_PROFILE=$profile" \
+    "MCP_ACCESS_GROUPS=$groups" \
+    'MCP_TOOL_ALLOWLIST=' \
+    "MCP_TOOL_DENYLIST=$denylist"
+
+  case "$profile" in
+    read_only|developer)
+      set_env 'MCP_DESKTOP_ENABLED=1' 'MCP_INPUT_ENABLED=0'
+      ;;
+    administrator|full)
+      set_env 'MCP_DESKTOP_ENABLED=1' 'MCP_INPUT_ENABLED=1'
+      ;;
+    custom)
+      case ",$groups," in *,desktop_view,*|*,desktop_control,*) set_env 'MCP_DESKTOP_ENABLED=1' ;; *) set_env 'MCP_DESKTOP_ENABLED=0' ;; esac
+      case ",$groups," in *,desktop_control,*) set_env 'MCP_INPUT_ENABLED=1' ;; *) set_env 'MCP_INPUT_ENABLED=0' ;; esac
+      ;;
+  esac
+  ACCESS_PROFILE_RESULT="$profile"
+}
+
+configure_access_only() {
+  [ -f "$ENV_FILE" ] || { err 'Primero completá la configuración inicial con bash start-mcp.sh.'; exit 1; }
+  chmod 600 "$ENV_FILE"
+  install -d -m 0700 "$PRIVATE_DIR" "$ROOT_DIR/.runtime"
+  configure_tool_access
+  set_env 'MCP_SETUP_COMPLETE=1' 'MCP_SETUP_VERSION=5'
+  line
+  echo ' PERFIL DE HERRAMIENTAS ACTUALIZADO'
+  line
+  echo "Perfil: $ACCESS_PROFILE_RESULT"
+  echo 'El cambio se aplicará al próximo inicio o reinicio del MCP.'
+  echo 'Detalle: ./mcpctl.sh permissions --tools'
+  line
+}
+
 main() {
   ensure_template
   local default_root access exposure port current_port
@@ -497,6 +585,8 @@ main() {
     set_env 'MCP_FULL_ACCESS=0' "ALLOWED_PATHS=$allowed" "WORKING_DIR=${allowed%%,*}"
   fi
 
+  configure_tool_access
+
   echo
   echo 'Cómo publicar el servidor:'
   echo '  1) NGROK (RECOMENDADO: HTTPS, funciona con CGNAT/IP dinámica y no abre el router)'
@@ -513,7 +603,7 @@ main() {
   configure_auth "$exposure" "$PUBLIC_URL_RESULT"
   set_env \
     'MCP_SETUP_COMPLETE=1' \
-    'MCP_SETUP_VERSION=4' \
+    'MCP_SETUP_VERSION=5' \
     'MCP_FAST_MODE=1' \
     'MCP_HUMAN_LOG=.runtime/events.log' \
     'ACTIVITY_LOG=.runtime/activity.ndjson' \
@@ -529,6 +619,7 @@ main() {
   else
     echo "URL para ChatGPT: $PUBLIC_URL_RESULT/mcp"
   fi
+  echo "Perfil de herramientas: $ACCESS_PROFILE_RESULT"
   case "$AUTH_RESULT" in
     oauth) echo 'Autenticación: OAuth 2.1. ChatGPT mostrará la pantalla de autorización.' ;;
     bearer) echo "Autenticación: Bearer. Token privado: $PRIVATE_DIR/bearer-token.txt" ;;
@@ -539,4 +630,7 @@ main() {
   line
 }
 
-main "$@"
+case "${1:-}" in
+  --access-only|--permissions-only) configure_access_only ;;
+  *) main "$@" ;;
+esac

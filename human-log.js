@@ -220,6 +220,48 @@ function describeToolStart(tool, args = {}) {
       return `Abriendo la imagen ${safePath(pathValue)} para inspección visual.`;
     case 'tail_file':
       return `Leyendo las últimas líneas de ${safePath(pathValue)}.`;
+    case 'tool_policy_status':
+      return 'Consultando el perfil de acceso y las herramientas habilitadas.';
+    case 'directory_tree':
+      return `Recorriendo la estructura de carpetas de ${safePath(args.path)}.`;
+    case 'file_hash':
+      return `Calculando la huella ${compact(args.algorithm || 'sha256', 30)} de ${safePath(args.path)}.`;
+    case 'file_copy':
+      return `Copiando ${safePath(args.source)} hacia ${safePath(args.destination)}.`;
+    case 'file_move':
+      return `Moviendo ${safePath(args.source)} hacia ${safePath(args.destination)}.`;
+    case 'file_delete':
+      return `Eliminando ${safePath(args.path)} después de una confirmación explícita.`;
+    case 'archive_create':
+      return `Creando un archivo comprimido de ${safePath(args.source)} en ${safePath(args.destination)}.`;
+    case 'archive_extract':
+      return `Extrayendo de forma segura ${safePath(args.archive)} en ${safePath(args.destination)}.`;
+    case 'http_request':
+      return `Consultando por HTTP ${safePath(args.url)}.`;
+    case 'port_check':
+      return `Comprobando la conexión TCP con ${compact(args.host, 120)}:${compact(args.port, 20)}.`;
+    case 'download_file':
+      return `Descargando un recurso hacia ${safePath(args.destination)}.`;
+    case 'package_status':
+      return 'Consultando el gestor de paquetes y el estado de los paquetes solicitados.';
+    case 'package_action':
+      return `${args.dryRun ? 'Simulando' : 'Aplicando'} una operación de paquetes: ${compact(args.action, 40)}.`;
+    case 'firewall_status':
+      return 'Consultando el estado y las reglas del firewall.';
+    case 'firewall_action':
+      return `${args.dryRun ? 'Simulando' : 'Aplicando'} un cambio de firewall: ${compact(args.action, 40)}.`;
+    case 'mount_status':
+      return 'Consultando unidades y puntos de montaje.';
+    case 'mount_action':
+      return `${args.dryRun ? 'Simulando' : 'Aplicando'} una operación de montaje: ${compact(args.action, 40)}.`;
+    case 'user_accounts':
+      return 'Consultando cuentas locales y grupos administrativos.';
+    case 'container_status':
+      return 'Consultando motores y contenedores disponibles.';
+    case 'container_compose':
+      return `${args.dryRun ? 'Simulando' : 'Ejecutando'} la acción Compose ${compact(args.action, 40)} en ${safePath(args.project)}.`;
+    case 'power_action':
+      return `${args.dryRun ? 'Simulando' : 'Programando'} ${args.action === 'reboot' ? 'el reinicio' : 'el apagado'} del equipo.`;
     case 'system_snapshot':
       return 'Recopilando un resumen del estado general del equipo.';
     case 'hardware_info':
@@ -351,6 +393,59 @@ function describeToolSuccess(tool, result, durationMs) {
     case 'git_log':
     case 'git_command':
       detail = `Operación Git finalizada con código ${payload.exit_code ?? payload.exitCode ?? 0}.`;
+      break;
+    case 'directory_tree':
+      detail = `Estructura leída: ${Number(payload.count || 0)} elemento(s)${payload.truncated ? '; resultado limitado' : ''}.`;
+      break;
+    case 'file_hash':
+      detail = `Huella ${payload.algorithm || ''} calculada correctamente.`;
+      break;
+    case 'file_copy':
+    case 'file_move':
+    case 'file_delete':
+    case 'archive_create':
+    case 'archive_extract':
+    case 'download_file':
+      detail = 'Operación de archivo completada correctamente.';
+      break;
+    case 'http_request':
+      detail = `Solicitud HTTP finalizada con estado ${payload.status ?? 'desconocido'}.`;
+      break;
+    case 'port_check':
+      detail = `Puerto ${payload.open ? 'accesible' : 'no accesible'}.`;
+      break;
+    case 'package_status':
+      detail = payload.available === false
+        ? 'No se encontró un gestor de paquetes compatible.'
+        : `Gestor de paquetes detectado: ${payload.manager || 'desconocido'}.`;
+      break;
+    case 'firewall_status':
+      detail = payload.available === false
+        ? 'No se encontró un firewall compatible.'
+        : payload.readable === false
+          ? `Se detectó ${payload.backend || 'el firewall'}, pero el usuario del MCP no puede leer su estado sin privilegios administrativos.`
+          : `Estado del firewall ${payload.backend || ''} consultado correctamente.`;
+      break;
+    case 'mount_status':
+      detail = 'Unidades y montajes consultados correctamente.';
+      break;
+    case 'user_accounts':
+      detail = `Cuentas consultadas: ${Array.isArray(payload.users) ? payload.users.length : 0}.`;
+      break;
+    case 'container_status':
+      detail = Array.isArray(payload.runtimes) && payload.runtimes.length
+        ? `Motores de contenedores detectados: ${payload.runtimes.map((item) => item.runtime).join(', ')}.`
+        : 'No se encontró Docker ni Podman disponible para este usuario.';
+      break;
+    case 'tool_policy_status':
+      detail = `Perfil ${payload.profile || 'desconocido'}: ${Number(payload.allowedToolCount || 0)} herramienta(s) visibles y ${Number(payload.blockedToolCount || 0)} bloqueada(s).`;
+      break;
+    case 'package_action':
+    case 'firewall_action':
+    case 'mount_action':
+    case 'container_compose':
+    case 'power_action':
+      detail = payload.dryRun ? 'Simulación preparada; no se aplicaron cambios.' : 'Acción administrativa completada.';
       break;
     default:
       break;

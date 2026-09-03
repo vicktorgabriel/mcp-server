@@ -16,6 +16,8 @@ const path = require('path');
 const readline = require('readline');
 const { URL } = require('url');
 const { createFullControl } = require('./full-control-tools');
+const { createExtendedTools } = require('./extended-tools');
+const { createAccessPolicy, TOOL_REQUIREMENTS } = require('./access-policy');
 const { describeToolStart, describeToolSuccess, friendlyError, humanEvent, redactText } = require('./human-log');
 const { OAuthProvider, normalizeBaseUrl } = require('./oauth-provider');
 const PACKAGE_VERSION = require('./package.json').version;
@@ -26,7 +28,9 @@ const JSONRPC_VERSION = '2.0';
 const MCP_VERSION = process.env.MCP_PROTOCOL_VERSION || '2025-11-25';
 const FULL_ACCESS = parseBoolean(process.env.MCP_FULL_ACCESS, false);
 const DEFAULT_ROOT = process.env.WORKING_DIR || inferDefaultRoot();
-const ALLOWED_ROOTS = FULL_ACCESS ? [path.resolve('/')] : parseAllowedRoots(process.env.ALLOWED_PATHS || DEFAULT_ROOT);
+const ALLOWED_ROOTS = FULL_ACCESS
+  ? [path.resolve('/')]
+  : canonicalizeAllowedRoots(parseAllowedRoots(process.env.ALLOWED_PATHS || DEFAULT_ROOT));
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
 const AUTH_TOKEN_FILE = resolveRepoPath(process.env.MCP_AUTH_TOKEN_FILE || '.private/bearer-token.txt');
@@ -35,7 +39,11 @@ const AUTH_MODE = normalizeAuthMode(process.env.MCP_AUTH_MODE, AUTH_TOKEN);
 const EXPOSURE_MODE = String(process.env.MCP_EXPOSURE_MODE || 'local').trim().toLowerCase();
 const CONFIGURED_PUBLIC_BASE_URL = configuredPublicBaseUrl();
 const OAUTH_STORE_PATH = resolveRepoPath(process.env.MCP_OAUTH_STORE || '.private/oauth-state.json');
-const OAUTH_PROVIDER = AUTH_MODE === 'oauth' ? new OAuthProvider({ storePath: OAUTH_STORE_PATH }) : null;
+const ACCESS_POLICY = createAccessPolicy(process.env, Object.keys(TOOL_REQUIREMENTS));
+const ACCESS_SUMMARY = ACCESS_POLICY.summary(Object.keys(TOOL_REQUIREMENTS));
+const OAUTH_PROVIDER = AUTH_MODE === 'oauth'
+  ? new OAuthProvider({ storePath: OAUTH_STORE_PATH, accessSummary: ACCESS_SUMMARY })
+  : null;
 const ACTIVITY_LOG = resolveRepoPath(process.env.ACTIVITY_LOG || '.runtime/activity.ndjson');
 const ERROR_LOG = resolveRepoPath(process.env.MCP_ERROR_LOG || '.runtime/errors.log');
 const DEFAULT_SEARCH_SKIP_DIRS = 'node_modules,.git';
@@ -241,6 +249,13 @@ function inferDefaultRoot() {
   return path.resolve(__dirname, '..');
 }
 
+function canonicalizeAllowedRoots(roots) {
+  return [...new Set(roots.map((root) => {
+    try { return fs.realpathSync.native(root); }
+    catch (error) { throw new Error(`Allowed root cannot be resolved: ${root}: ${error.message}`); }
+  }))];
+}
+
 function validateAllowedRoots(roots) {
   if (!Array.isArray(roots) || roots.length === 0) {
     throw new Error('ALLOWED_PATHS resolved to no directories');
@@ -340,6 +355,10 @@ function envValue(name, fallback) {
 function recommendedStdioEnv() {
   return {
     MCP_FULL_ACCESS: envValue('MCP_FULL_ACCESS', 0),
+    MCP_ACCESS_PROFILE: envValue('MCP_ACCESS_PROFILE', 'developer'),
+    MCP_ACCESS_GROUPS: envValue('MCP_ACCESS_GROUPS', ''),
+    MCP_TOOL_ALLOWLIST: envValue('MCP_TOOL_ALLOWLIST', ''),
+    MCP_TOOL_DENYLIST: envValue('MCP_TOOL_DENYLIST', ''),
     ALLOWED_PATHS: rootForDisplay(),
     WORKING_DIR: envValue('WORKING_DIR', DEFAULT_ROOT),
     MCP_FAST_MODE: envValue('MCP_FAST_MODE', 1),
@@ -388,6 +407,23 @@ function isInside(root, candidate) {
   return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
+function nearestExistingPath(candidate) {
+  let current = candidate;
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return current;
+}
+
+function containmentPath(candidate) {
+  const existing = nearestExistingPath(candidate);
+  const realExisting = fs.realpathSync.native(existing);
+  const remainder = path.relative(existing, candidate);
+  return path.resolve(realExisting, remainder);
+}
+
 function resolvePath(userPath = '.') {
   const rawPath = String(userPath || '.');
 
@@ -402,13 +438,17 @@ function resolvePath(userPath = '.') {
   const candidate = path.isAbsolute(rawPath)
     ? path.resolve(rawPath)
     : path.resolve(ALLOWED_ROOTS[0], rawPath);
-
-  const root = ALLOWED_ROOTS.find((allowedRoot) => isInside(allowedRoot, candidate));
+  const effectiveCandidate = containmentPath(candidate);
+  const root = ALLOWED_ROOTS.find((allowedRoot) => isInside(allowedRoot, effectiveCandidate));
   if (!root) {
-    throw new Error(`Path is outside allowed roots: ${rawPath}`);
+    throw new Error(`Path is outside allowed roots or escapes through a symbolic link: ${rawPath}`);
   }
 
-  return { fullPath: candidate, displayPath: path.relative(root, candidate) || '.', root };
+  return {
+    fullPath: candidate,
+    displayPath: path.relative(root, effectiveCandidate) || '.',
+    root
+  };
 }
 
 function textResult(payload) {
@@ -602,10 +642,21 @@ function summarizeToolArgs(tool, args) {
 class MCPFileServer {
   constructor() {
     this.fullControl = createFullControl({ resolvePath, buildToolMetadata, textResult });
+    this.extendedTools = createExtendedTools({ resolvePath, buildToolMetadata, textResult });
+    this.accessPolicy = ACCESS_POLICY;
   }
 
-  getTools() {
+  getAllTools() {
     const baseTools = [
+      {
+        name: 'tool_policy_status',
+        ...buildToolMetadata('Tool Access Policy', {
+          readOnlyHint: true,
+          openWorldHint: false
+        }),
+        description: 'Shows the active access profile, enabled groups, allowed tools and blocked tools without exposing secrets.',
+        inputSchema: { type: 'object', properties: {}, required: [] }
+      },
       {
         name: 'search',
         ...buildToolMetadata('Search Files', {
@@ -752,7 +803,15 @@ class MCPFileServer {
         outputSchema: TOOL_OUTPUT_SCHEMAS.run_command
       }
     ];
-    return [...baseTools, ...this.fullControl.tools];
+    return [...baseTools, ...this.fullControl.tools, ...this.extendedTools.tools];
+  }
+
+  getTools() {
+    return this.accessPolicy.filterTools(this.getAllTools());
+  }
+
+  policySummary() {
+    return this.accessPolicy.summary(this.getAllTools().map((tool) => tool.name));
   }
 
   initialize() {
@@ -828,7 +887,10 @@ class MCPFileServer {
   }
 
   async callTool(name, args) {
+    this.accessPolicy.assertAllowed(name);
     switch (name) {
+      case 'tool_policy_status':
+        return textResult(this.policySummary());
       case 'search':
         return textResult(this.searchFiles(args));
       case 'fetch':
@@ -844,6 +906,8 @@ class MCPFileServer {
       case 'run_command':
         return textResult(await this.runCommand(args));
       default: {
+        const extended = await this.extendedTools.callTool(name, args);
+        if (extended !== null) return extended;
         const extra = await this.fullControl.callTool(name, args);
         if (extra !== null) return extra;
         throw new Error(`Tool not found: ${name}`);
@@ -1465,6 +1529,7 @@ function buildClientConfig(baseUrl) {
     allowedRoots: ALLOWED_ROOTS,
     tools: new MCPFileServer().getTools().map((tool) => tool.name),
     fullAccess: FULL_ACCESS,
+    accessPolicy: new MCPFileServer().policySummary(),
     authMode: AUTH_MODE,
     bearerTokenConfigured: AUTH_MODE === 'bearer' && Boolean(AUTH_TOKEN),
     oauth: AUTH_MODE === 'oauth' ? OAUTH_PROVIDER.authSummary() : null

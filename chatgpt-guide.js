@@ -43,6 +43,9 @@ async function main() {
   );
   const endpoint = base ? `${base}/mcp` : 'INICIÁ EL MCP Y EJECUTÁ: ./mcpctl.sh url';
   const authMode = String(env.MCP_AUTH_MODE || (env.MCP_AUTH_TOKEN ? 'bearer' : 'none')).toLowerCase();
+  const accessProfile = status.config && (status.config.accessProfileLabel || status.config.accessProfile)
+    || env.MCP_ACCESS_PROFILE
+    || 'developer';
 
   process.stdout.write(`
 ========================================================================
@@ -51,6 +54,9 @@ async function main() {
 
 URL del servidor:
   ${endpoint}
+
+Perfil de herramientas:
+  ${accessProfile}
 
 Pasos en ChatGPT Web:
 
@@ -77,12 +83,15 @@ Pasos en ChatGPT Web:
      o mediante una mención con @, según la interfaz disponible.
 
 Prueba sugerida:
-  Usá el MCP de este equipo y ejecutá control_capabilities.
+  Ejecutá tool_policy_status para revisar los permisos publicados y luego
+  control_capabilities para comprobar qué backends existen realmente.
 
 Administración local:
   Ver actividad:          ./mcpctl.sh logs
   Seguir actividad:       ./mcpctl.sh logs-follow
   Estado y URL:           ./mcpctl.sh status
+  Perfil y herramientas:  ./mcpctl.sh permissions --tools
+  Cambiar sólo el perfil: ./mcpctl.sh permissions-set
   Modo persistente:       ./start-mcp.sh --persistent
   Reconfigurar/OAuth:     ./mcpctl.sh configure
 

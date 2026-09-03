@@ -49,10 +49,12 @@ PY
 }
 
 migrate_existing_config() {
-  local auth_mode public_base mode token
+  local auth_mode public_base mode token access_profile
   mode="$(read_config MCP_EXPOSURE_MODE ngrok)"
   token="$(read_config MCP_AUTH_TOKEN '')"
   auth_mode="$(read_config MCP_AUTH_MODE '')"
+  access_profile="$(read_config MCP_ACCESS_PROFILE '')"
+  [ -n "$access_profile" ] || access_profile='full'
   if [ -z "$auth_mode" ]; then
     if [ -n "$token" ]; then auth_mode='bearer'; else auth_mode='none'; fi
   fi
@@ -69,11 +71,15 @@ migrate_existing_config() {
   fi
   set_config \
     "MCP_AUTH_MODE=$auth_mode" \
+    "MCP_ACCESS_PROFILE=$access_profile" \
+    'MCP_ACCESS_GROUPS=' \
+    'MCP_TOOL_ALLOWLIST=' \
+    'MCP_TOOL_DENYLIST=' \
     "MCP_AUTH_TOKEN=$token" \
     'MCP_AUTH_TOKEN_FILE=.private/bearer-token.txt' \
     "MCP_PUBLIC_BASE_URL=$public_base" \
     'MCP_SETUP_COMPLETE=1' \
-    'MCP_SETUP_VERSION=4' \
+    'MCP_SETUP_VERSION=5' \
     'MCP_HUMAN_LOG=.runtime/events.log' \
     'ACTIVITY_LOG=.runtime/activity.ndjson'
   if [ "$auth_mode" = 'none' ] && [ "$mode" != 'local' ]; then
@@ -87,19 +93,28 @@ if [ ! -f .env ] || [ "${MCP_FORCE_SETUP:-0}" = '1' ] || [ "${1:-}" = '--reconfi
 else
   chmod 600 .env
   SETUP_MARKER="$(read_config MCP_SETUP_COMPLETE '')"
+  SETUP_VERSION="$(read_config MCP_SETUP_VERSION 0)"
+  ACCESS_PROFILE_MARKER="$(read_config MCP_ACCESS_PROFILE '')"
   if [ "$SETUP_MARKER" = '0' ]; then
     info 'El archivo .env existe, pero la configuración inicial todavía no fue completada.'
     ./configure-mcp.sh
-  elif [ -z "$SETUP_MARKER" ]; then
-    info 'Actualizando la configuración existente al nuevo formato sin cambiar su acceso.'
+  elif [ -z "$SETUP_MARKER" ] || ! [[ "$SETUP_VERSION" =~ ^[0-9]+$ ]] \
+       || [ "$SETUP_VERSION" -lt 5 ] || [ -z "$ACCESS_PROFILE_MARKER" ]; then
+    info 'Actualizando la configuración existente al nuevo formato sin cambiar el acceso anterior.'
     migrate_existing_config
   fi
 fi
 
 MODE="$(read_config MCP_EXPOSURE_MODE ngrok)"
 AUTH_MODE="$(read_config MCP_AUTH_MODE none)"
+ACCESS_PROFILE="$(read_config MCP_ACCESS_PROFILE developer)"
 FULL_ACCESS="$(read_config MCP_FULL_ACCESS 0)"
 PUBLIC_URL="$(read_config MCP_PUBLIC_BASE_URL '')"
+node - <<'NODE'
+const { parseDotEnv } = require('./runtime-diagnostics');
+const { createAccessPolicy } = require('./access-policy');
+createAccessPolicy({ ...parseDotEnv(), ...process.env });
+NODE
 
 if [ "$MODE" = 'ngrok' ]; then
   NGROK_BIN_VALUE="$(read_config NGROK_BIN '')"
@@ -146,4 +161,4 @@ elif [ "$AUTH_MODE" = 'none' ] && [ "$MODE" != 'local' ]; then
   warn 'El servidor se publicará sin autenticación. No lo dejes activo permanentemente salvo que sea una decisión explícita.'
 fi
 
-info "Preparación completa: exposición=$MODE, autenticación=$AUTH_MODE, full_access=$FULL_ACCESS"
+info "Preparación completa: exposición=$MODE, autenticación=$AUTH_MODE, perfil=$ACCESS_PROFILE, full_access=$FULL_ACCESS"

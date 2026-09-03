@@ -167,6 +167,8 @@ Uso:
   ./start-mcp.sh --url          URL publica activa para ChatGPT
   ./start-mcp.sh --logs         Actividad explicada en lenguaje legible
   ./start-mcp.sh --configure    Reabre el asistente inicial
+  ./start-mcp.sh --permissions  Muestra el perfil y las herramientas habilitadas
+  ./start-mcp.sh --permissions-set  Cambia sólo el perfil de herramientas
   ./start-mcp.sh --chatgpt      Guía para agregarlo a ChatGPT
   ./start-mcp.sh --stop         Detiene el servicio persistente
   ./start-mcp.sh --disable      Detiene y deshabilita el inicio automatico
@@ -195,6 +197,13 @@ case "${1:-}" in
     ;;
   --configure)
     exec ./mcpctl.sh configure
+    ;;
+  --permissions|--access)
+    shift
+    exec ./mcpctl.sh permissions "$@"
+    ;;
+  --permissions-set|--access-set)
+    exec ./mcpctl.sh permissions-set
     ;;
   --chatgpt)
     exec ./mcpctl.sh chatgpt

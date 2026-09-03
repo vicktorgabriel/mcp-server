@@ -82,6 +82,11 @@ async function printHeader(status, includeTable = true) {
   process.stdout.write(`Estado:          ${stateLabel(status)}\n`);
   process.stdout.write(`Modo de inicio:  ${launchLabel(status.launch)}\n`);
   process.stdout.write(`Autenticación:   ${authLabel(auth)}\n`);
+  const accessLabel = status.config && (status.config.accessProfileLabel || status.config.accessProfile) || 'no configurado';
+  const accessCount = status.config && Number.isInteger(status.config.allowedToolCount)
+    ? `, ${status.config.allowedToolCount} herramientas`
+    : '';
+  process.stdout.write(`Acceso:          ${accessLabel}${accessCount}\n`);
   process.stdout.write(`Conexión:        ${url}\n`);
   if (status.warnings && status.warnings.length) {
     process.stdout.write(`Aviso:           ${redactText(status.warnings[0])}\n`);

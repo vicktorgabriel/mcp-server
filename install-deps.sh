@@ -140,18 +140,18 @@ if [ "$INSTALL_OPTIONAL" = "1" ] && [ "$PM" != "none" ]; then
   # Se instalan individualmente para que un paquete ausente en una distro no aborte todo el setup.
   case "$PM" in
     apt)
-      OPTIONAL=(tmux wmctrl scrot python3-xlib xdotool ffmpeg v4l-utils gnome-screenshot grim slurp)
+      OPTIONAL=(tmux wmctrl scrot python3-xlib xdotool ffmpeg v4l-utils gnome-screenshot grim slurp zip unzip)
       if [ "${XDG_CURRENT_DESKTOP:-}" = "KDE" ] || [ "${DESKTOP_SESSION:-}" = "plasma" ]; then OPTIONAL+=(kde-spectacle); fi
       ;;
-    dnf) OPTIONAL=(tmux wmctrl scrot python3-xlib xdotool ffmpeg v4l-utils grim slurp)
+    dnf) OPTIONAL=(tmux wmctrl scrot python3-xlib xdotool ffmpeg v4l-utils grim slurp zip unzip)
       ;;
-    pacman) OPTIONAL=(tmux wmctrl scrot python-xlib xdotool ffmpeg v4l-utils grim slurp)
+    pacman) OPTIONAL=(tmux wmctrl scrot python-xlib xdotool ffmpeg v4l-utils grim slurp zip unzip)
       ;;
-    zypper) OPTIONAL=(tmux wmctrl scrot python3-xlib xdotool ffmpeg v4l-utils grim slurp)
+    zypper) OPTIONAL=(tmux wmctrl scrot python3-xlib xdotool ffmpeg v4l-utils grim slurp zip unzip)
       ;;
-    apk) OPTIONAL=(tmux python3 py3-xlib ffmpeg v4l-utils)
+    apk) OPTIONAL=(tmux python3 py3-xlib ffmpeg v4l-utils zip unzip)
       ;;
-    brew) OPTIONAL=(tmux ffmpeg)
+    brew) OPTIONAL=(tmux ffmpeg zip)
       ;;
     *) OPTIONAL=() ;;
   esac

@@ -35,6 +35,7 @@ const MAX_LOG_BYTES = positiveInt(process.env.MCP_RUNTIME_LOG_MAX_BYTES, 10 * 10
 const HEALTH_START_TIMEOUT_MS = positiveInt(process.env.MCP_HEALTH_START_TIMEOUT_MS, 30000, 5000, 300000);
 const NGROK_BIN = process.env.NGROK_BIN || 'ngrok';
 const AUTH_MODE = String(process.env.MCP_AUTH_MODE || (process.env.MCP_AUTH_TOKEN ? 'bearer' : 'none')).toLowerCase();
+const ACCESS_PROFILE = String(process.env.MCP_ACCESS_PROFILE || 'developer').toLowerCase();
 const CONFIGURED_NGROK_URL = normalizeNgrokUrl(process.env.NGROK_URL || process.env.NGROK_DOMAIN);
 
 fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 });
@@ -53,6 +54,7 @@ const status = {
   mode: MODE,
   launchMode: LAUNCH_MODE,
   authMode: AUTH_MODE,
+  accessProfile: ACCESS_PROFILE,
   host: HOST,
   port: PORT,
   supervisorPid: process.pid,

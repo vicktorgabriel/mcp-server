@@ -9,6 +9,10 @@ cleanup_selftest() {
 trap cleanup_selftest EXIT
 
 export MCP_FULL_ACCESS="${MCP_FULL_ACCESS:-1}"
+export MCP_ACCESS_PROFILE="${MCP_ACCESS_PROFILE:-full}"
+export MCP_ACCESS_GROUPS="${MCP_ACCESS_GROUPS:-}"
+export MCP_TOOL_ALLOWLIST="${MCP_TOOL_ALLOWLIST:-}"
+export MCP_TOOL_DENYLIST="${MCP_TOOL_DENYLIST:-}"
 export WORKING_DIR="${WORKING_DIR:-$(cd .. && pwd)}"
 export MCP_AUTH_MODE=none
 export MCP_EXPOSURE_MODE=local
@@ -23,13 +27,23 @@ npm run check
 printf '\n== Launcher and administration commands ==\n'
 LAUNCHER_HELP="$(./start-mcp.sh --help)"
 CONTROL_HELP="$(./mcpctl.sh --help)"
-for option in --temporary --persistent --configure --chatgpt; do grep -q -- "$option" <<<"$LAUNCHER_HELP"; done
-for command in configure chatgpt logs-follow logs-raw oauth-status oauth-reset; do grep -q "$command" <<<"$CONTROL_HELP"; done
+for option in --temporary --persistent --configure --permissions --permissions-set --chatgpt; do grep -q -- "$option" <<<"$LAUNCHER_HELP"; done
+for command in configure permissions permissions-set chatgpt logs-follow logs-raw oauth-status oauth-reset; do grep -q "$command" <<<"$CONTROL_HELP"; done
 grep -q 'MCP_LAUNCH_MODE=persistent' install-service.sh
+PERMISSIONS_OUTPUT="$(MCP_ACCESS_PROFILE=read_only MCP_FULL_ACCESS=0 ./mcpctl.sh permissions --tools)"
+grep -q 'Sólo lectura y observación' <<<"$PERMISSIONS_OUTPUT"
+grep -q '+ read_file' <<<"$PERMISSIONS_OUTPUT"
+grep -q -- '- run_command' <<<"$PERMISSIONS_OUTPUT"
 echo 'launcher_and_control=OK'
 
 printf '\n== First-run wizard ==\n'
 ./setup-self-test.sh
+
+printf '\n== Access profiles ==\n'
+node access-policy-self-test.js
+
+printf '\n== Extended tools ==\n'
+node extended-tools-self-test.js
 
 printf '\n== Authentication modes ==\n'
 node auth-mode-self-test.js
@@ -102,11 +116,11 @@ mcp_call() {
 printf '\n== Tool inventory ==\n'
 TOOLS_JSON="$(mcp_call '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')"
 printf '%s\n' "$TOOLS_JSON" | node -e '
-let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); const names=j.result.tools.map(t=>t.name); console.log(`tools=${names.length}`); const required=["mcp_runtime_status","mcp_runtime_logs","run_command","screen_capture"]; if(names.length < 51 || required.some(name=>!names.includes(name))) process.exit(2);});'
+let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); const names=j.result.tools.map(t=>t.name); console.log(`tools=${names.length}`); const required=["tool_policy_status","mcp_runtime_status","mcp_runtime_logs","run_command","screen_capture","directory_tree","file_hash","package_action","power_action"]; if(names.length !== 72 || required.some(name=>!names.includes(name))) process.exit(2);});'
 
 printf '\n== Runtime diagnostics tool ==\n'
 mcp_call '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"mcp_runtime_status","arguments":{}}}' \
-  | node -e 'let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); if(j.error) throw new Error(j.error.message); const x=j.result.structuredContent; if(!x || !x.config || !x.local || !x.tunnel || x.config.authMode!=="none") throw new Error("runtime status incomplete"); console.log(`runtime_status=OK mode=${x.config.exposureMode} auth=${x.config.authMode}`);});'
+  | node -e 'let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); if(j.error) throw new Error(j.error.message); const x=j.result.structuredContent; if(!x || !x.config || !x.local || !x.tunnel || x.config.authMode!=="none" || x.config.accessProfile!=="full" || x.config.allowedToolCount!==72) throw new Error("runtime status incomplete"); console.log(`runtime_status=OK mode=${x.config.exposureMode} auth=${x.config.authMode} profile=${x.config.accessProfile} tools=${x.config.allowedToolCount}`);});'
 
 printf '\n== Temporary supervisor and readable logs ==\n'
 (
@@ -173,7 +187,7 @@ FAKE
 
 printf '\n== Capability probe ==\n'
 mcp_call '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"control_capabilities","arguments":{}}}' \
-  | node -e 'let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s);if(j.error)throw new Error(j.error.message);console.log(`capability_probe=OK platform=${j.result.structuredContent.platform}`);});'
+  | node -e 'let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s);if(j.error)throw new Error(j.error.message);const x=j.result.structuredContent;if(!x.privileges||typeof x.privileges.administrativeToolsUsable!=="boolean")throw new Error("privilege probe missing");console.log(`capability_probe=OK platform=${x.platform} admin=${x.privileges.administrativeToolsUsable}`);});'
 
 printf '\n== Git wrapper ==\n'
 REQ=$(node -e 'console.log(JSON.stringify({jsonrpc:"2.0",id:3,method:"tools/call",params:{name:"git_status",arguments:{repo:process.cwd()}}}))')

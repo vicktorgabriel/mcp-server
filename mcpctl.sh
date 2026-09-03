@@ -42,6 +42,8 @@ Uso: ./mcpctl.sh COMANDO
   url             Muestra la URL activa para ChatGPT
   chatgpt         Guía paso a paso para agregarlo en ChatGPT
   configure       Reabre el asistente de ngrok, URL, acceso y autenticación
+  permissions     Muestra el perfil y las herramientas permitidas/bloqueadas
+  permissions-set Cambia sólo el perfil, sin volver a pedir ngrok/OAuth
   temporary       Inicia en primer plano; cerrar terminal detiene todo
   persistent      Instala/inicia el servicio persistente
   start           Inicia el servicio instalado
@@ -69,6 +71,33 @@ case "$COMMAND" in
     ;;
   chatgpt)
     node chatgpt-guide.js
+    ;;
+  permissions|access)
+    node access-policy-cli.js "${@:2}"
+    ;;
+  permissions-set|access-set|permissions-configure|access-configure)
+    if PID="$(temporary_runtime_pid)"; then
+      echo "[ERROR] Hay una sesión temporal activa en esta carpeta (PID $PID)." >&2
+      echo '[ERROR] Volvé a su terminal, presioná Ctrl+C y ejecutá nuevamente este comando.' >&2
+      exit 1
+    fi
+    RESTART_AFTER=0
+    if service_exists && systemctl is-active --quiet "$SERVICE"; then
+      echo '[INFO] Deteniendo el servicio persistente mientras se cambia el perfil.'
+      root_run systemctl stop "$SERVICE"
+      RESTART_AFTER=1
+    fi
+    if ! ./configure-mcp.sh --access-only; then
+      if [ "$RESTART_AFTER" = '1' ]; then
+        root_run systemctl start "$SERVICE" || true
+        echo '[AVISO] La configuración fue cancelada; se restauró el servicio anterior.' >&2
+      fi
+      exit 1
+    fi
+    if [ "$RESTART_AFTER" = '1' ]; then
+      root_run systemctl start "$SERVICE"
+      echo '[OK] Servicio reiniciado con el nuevo perfil.'
+    fi
     ;;
   configure)
     if service_exists && systemctl is-active --quiet "$SERVICE"; then

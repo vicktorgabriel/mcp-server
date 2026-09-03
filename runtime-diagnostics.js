@@ -6,6 +6,7 @@ const path = require('path');
 const http = require('http');
 const { spawn } = require('child_process');
 const { redactText: redactSensitiveText } = require('./human-log');
+const { createAccessPolicy, TOOL_REQUIREMENTS } = require('./access-policy');
 
 const ROOT = __dirname;
 const DEFAULT_SERVICE = 'mcp-local.service';
@@ -232,6 +233,13 @@ async function collectRuntimeStatus() {
     catch (_) { return false; }
   })();
   const authMode = String(configValue(fileEnv, 'MCP_AUTH_MODE', bearerConfigured ? 'bearer' : 'none')).toLowerCase();
+  let accessPolicy = null;
+  let accessPolicyError = '';
+  try {
+    accessPolicy = createAccessPolicy({ ...fileEnv, ...process.env }).summary(Object.keys(TOOL_REQUIREMENTS));
+  } catch (error) {
+    accessPolicyError = error.message;
+  }
   const oauthStorePath = resolveConfigPath(configValue(fileEnv, 'MCP_OAUTH_STORE', '.private/oauth-state.json'), '.private/oauth-state.json');
   const publicBaseUrl = String(configValue(fileEnv, 'PUBLIC_BASE_URL', '')).replace(/\/+$/, '');
   const serviceName = configValue(fileEnv, 'MCP_SERVICE_NAME', process.env.MCP_SERVICE_NAME || DEFAULT_SERVICE);
@@ -334,6 +342,7 @@ async function collectRuntimeStatus() {
   if (!runtimeActive && !service.installed) warnings.push(`El servicio ${serviceName} no esta instalado y no hay una sesion temporal activa.`);
   else if (!runtimeActive && !service.active) warnings.push(`El servicio ${serviceName} no esta activo (${service.state}/${service.subState}).`);
   if (runtimeRaw && !runtimeFresh) warnings.push(`El estado de ejecucion tiene ${runtimeAgeSeconds} segundos y puede estar obsoleto.`);
+  if (accessPolicyError) warnings.push(`La política de herramientas no es válida: ${accessPolicyError}`);
   if (runtimeActive && runtimeLaunchMode === 'temporary') {
     notes.push('Modo temporal activo: cerrar la terminal o pulsar Ctrl+C detiene MCP y ngrok.');
   }
@@ -353,6 +362,13 @@ async function collectRuntimeStatus() {
       port,
       exposureMode: mode,
       fullAccess: String(configValue(fileEnv, 'MCP_FULL_ACCESS', '0')) === '1',
+      accessProfile: accessPolicy ? accessPolicy.profile : configValue(fileEnv, 'MCP_ACCESS_PROFILE', 'developer'),
+      accessProfileLabel: accessPolicy ? accessPolicy.label : '',
+      accessGroups: accessPolicy ? accessPolicy.groups : [],
+      toolAllowlist: accessPolicy ? accessPolicy.allowlist : [],
+      toolDenylist: accessPolicy ? accessPolicy.denylist : [],
+      allowedToolCount: accessPolicy ? accessPolicy.allowedToolCount : 0,
+      blockedToolCount: accessPolicy ? accessPolicy.blockedToolCount : 0,
       authMode,
       authConfigured: authMode === 'oauth' ? fs.existsSync(oauthStorePath) : authMode === 'bearer' ? bearerConfigured : false,
       oauthStorePresent: authMode === 'oauth' && fs.existsSync(oauthStorePath),

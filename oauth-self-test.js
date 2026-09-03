@@ -78,6 +78,7 @@ async function main() {
       MCP_FULL_ACCESS: '0',
       MCP_AUTH_MODE: 'oauth',
       MCP_AUTH_TOKEN: '',
+      MCP_ACCESS_PROFILE: 'developer',
       MCP_PUBLIC_BASE_URL: base,
       PUBLIC_BASE_URL: base,
       MCP_OAUTH_ALLOW_HTTP_LOCALHOST: '1',
@@ -161,6 +162,8 @@ async function main() {
     assert.ok(!page.includes(password));
     assert.ok(!page.includes('value="tester"'), 'the public authorization page must not disclose the OAuth username');
     assert.ok(page.includes('127.0.0.1:45891'), 'the consent page must show the exact callback destination');
+    assert.ok(page.includes('Desarrollo'), 'the consent page must show the selected access profile');
+    assert.ok(page.includes('56'), 'the consent page must show the published tool count');
 
     const authorization = await fetch(`${base}/oauth/authorize`, {
       method: 'POST',

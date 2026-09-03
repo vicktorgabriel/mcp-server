@@ -429,13 +429,26 @@ function createFullControl({ resolvePath, buildToolMetadata, textResult }) {
   async function callTool(name, args = {}) {
     switch (name) {
       case 'control_capabilities': {
-        const commands = ['bash', 'git', 'tmux', 'systemctl', 'journalctl', 'ps', 'ip', 'ss', 'lscpu', 'lsblk', 'nvidia-smi', 'wmctrl', 'spectacle', 'gnome-screenshot', 'grim', 'scrot', 'ffmpeg', 'v4l2-ctl', 'pactl', 'arecord', 'aplay', 'xdg-open', 'python3'];
+        const commands = [
+          'bash', 'git', 'tmux', 'systemctl', 'systemd-run', 'journalctl', 'ps', 'ip', 'ss',
+          'lscpu', 'lsblk', 'findmnt', 'mount', 'umount', 'getent', 'tar', 'zip', 'unzip',
+          'curl', 'wget', 'sha256sum', 'apt-get', 'dnf', 'pacman', 'zypper', 'apk',
+          'ufw', 'firewall-cmd', 'nft', 'docker', 'podman', 'docker-compose',
+          'nvidia-smi', 'wmctrl', 'spectacle', 'gnome-screenshot', 'grim', 'scrot',
+          'ffmpeg', 'v4l2-ctl', 'pactl', 'arecord', 'aplay', 'xdg-open', 'python3'
+        ];
         const available = {};
         for (const command of commands) available[command] = await commandExists(command);
         let desktopHelper = { available: false };
         if (available.python3 && fs.existsSync(HELPER)) {
           const probe = await execCommand('python3', [HELPER, '--help'], { timeoutMs: 10000 });
           desktopHelper = { available: probe.exit_code === 0, exit_code: probe.exit_code, stderr: probe.stderr.trim() };
+        }
+        const effectiveUid = typeof process.getuid === 'function' ? process.getuid() : null;
+        let sudoNonInteractive = false;
+        if (effectiveUid !== 0 && await commandExists('sudo')) {
+          const sudoProbe = await execCommand('sudo', ['-n', 'true'], { timeoutMs: 5000 });
+          sudoNonInteractive = sudoProbe.exit_code === 0;
         }
         return textResult({
           platform: process.platform,
@@ -447,7 +460,14 @@ function createFullControl({ resolvePath, buildToolMetadata, textResult }) {
           sessionType: process.env.XDG_SESSION_TYPE || '',
           commands: available,
           desktopHelper,
-          note: 'All tools run with the permissions of the MCP server user; root-only actions still require OS authorization.'
+          privileges: {
+            effectiveUid,
+            user: os.userInfo().username,
+            root: effectiveUid === 0,
+            sudoNonInteractive,
+            administrativeToolsUsable: effectiveUid === 0 || sudoNonInteractive
+          },
+          note: 'All tools run with the permissions of the MCP server user; root-only actions require root or non-interactive sudo configured by the local administrator.'
         });
       }
       case 'mcp_runtime_status':

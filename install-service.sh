@@ -63,6 +63,11 @@ const { parseDotEnv } = require('./runtime-diagnostics');
 process.stdout.write(String(parseDotEnv().MCP_EXPOSURE_MODE || 'ngrok'));
 NODE
 )"
+ACCESS_PROFILE="$(cd "$ROOT_DIR" && node - <<'NODE'
+const { parseDotEnv } = require('./runtime-diagnostics');
+process.stdout.write(String(parseDotEnv().MCP_ACCESS_PROFILE || 'developer'));
+NODE
+)"
 PUBLIC_URL="$(cd "$ROOT_DIR" && node - <<'NODE'
 const { parseDotEnv } = require('./runtime-diagnostics');
 const env=parseDotEnv();
@@ -247,6 +252,7 @@ echo "Servicio: $SERVICE"
 echo "Usuario:  $TARGET_USER"
 echo "Estado:   $(systemctl is-active "$SERVICE" || true)"
 echo "Seguridad: $AUTH_MODE"
+echo "Perfil:    $ACCESS_PROFILE"
 if [ -n "$URL" ]; then
   echo "URL PARA CHATGPT:"
   echo "  $URL"
