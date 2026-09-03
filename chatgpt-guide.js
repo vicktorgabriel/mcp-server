@@ -18,6 +18,8 @@ function authInstructions(mode) {
       'Con CIMD ChatGPT usa su URL HTTPS de metadatos como client_id y no realiza un POST de registro.',
       'El modo predeterminado es cliente público none + PKCE, sin depender de JWKS. private_key_jwt queda disponible como opción avanzada con MCP_OAUTH_PRIVATE_KEY_JWT=1.',
       'Con DCR ChatGPT se registra automáticamente mediante el registration_endpoint publicado.',
+      'Desde MCP-Server 4.5.0 el callback específico por conexión es el modo predeterminado; después de actualizar desde 4.4.x, eliminá y recreá la app una vez.',
+      'Cada herramienta declara securitySchemes OAuth y puede disparar el linking mediante mcp/www_authenticate sin ejecutar acciones antes del login.',
       'Al escanear las herramientas se abrirá la página de autorización del MCP.',
       'Ingresá el usuario y la contraseña OAuth que configuraste en el primer inicio, revisá el destino y autorizá.'
     ];

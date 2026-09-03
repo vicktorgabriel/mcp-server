@@ -1,7 +1,7 @@
 {
   "name": "mcp-server-local",
-  "version": "4.4.2",
-  "description": "Servidor MCP local/privado con OAuth 2.1 CIMD/DCR, private_key_jwt y 72 herramientas",
+  "version": "4.5.0",
+  "description": "Servidor MCP local/privado con OAuth 2.1 compatible con ChatGPT y 72 herramientas",
   "main": "mcp-server.js",
   "scripts": {
     "test": "npm run check && node startup-banner-self-test.js && node access-policy-self-test.js && node extended-tools-self-test.js && node auth-mode-self-test.js && node oauth-admin-self-test.js && node oauth-cimd-self-test.js && node oauth-private-key-jwt-self-test.js && node oauth-self-test.js && ./setup-self-test.sh",

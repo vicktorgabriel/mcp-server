@@ -545,6 +545,9 @@ class OAuthProvider {
     this.dynamicRegistration = options.dynamicRegistration !== undefined
       ? Boolean(options.dynamicRegistration)
       : String(process.env.MCP_OAUTH_DYNAMIC_REGISTRATION || '1') !== '0';
+    this.responseIssEnabled = options.responseIssEnabled !== undefined
+      ? Boolean(options.responseIssEnabled)
+      : String(process.env.MCP_OAUTH_RESPONSE_ISS || '0') === '1';
     this.cimdEnabled = options.cimdEnabled !== undefined
       ? Boolean(options.cimdEnabled)
       : String(process.env.MCP_OAUTH_CIMD || '0') !== '0';
@@ -602,6 +605,7 @@ class OAuthProvider {
       response_types_supported: ['code'],
       response_modes_supported: ['query'],
       grant_types_supported: ['authorization_code', 'refresh_token'],
+      ...(this.responseIssEnabled ? { authorization_response_iss_parameter_supported: true } : {}),
       token_endpoint_auth_methods_supported: [
         'none',
         ...(this.privateKeyJwtEnabled ? ['private_key_jwt'] : []),
@@ -615,7 +619,6 @@ class OAuthProvider {
         'client_secret_post'
       ],
       code_challenge_methods_supported: ['S256'],
-      authorization_response_iss_parameter_supported: true,
       resource_indicators_supported: true,
       scopes_supported: [DEFAULT_SCOPE, OFFLINE_SCOPE],
       service_documentation: `${issuer}/oauth/help`
@@ -644,7 +647,8 @@ class OAuthProvider {
       activeRefreshTokens: Object.keys(this.store.state.refreshTokens).length,
       dynamicRegistration: this.dynamicRegistration,
       clientIdMetadataDocuments: this.cimdEnabled,
-      privateKeyJwt: this.privateKeyJwtEnabled
+      privateKeyJwt: this.privateKeyJwtEnabled,
+      authorizationResponseIssuer: this.responseIssEnabled
     };
   }
 
@@ -680,7 +684,7 @@ class OAuthProvider {
     };
   }
 
-  sendProtectedResourceError(req, res, baseUrl, reason = 'invalid_token') {
+  protectedResourceChallenge(baseUrl, reason = 'invalid_token') {
     const issuer = normalizeBaseUrl(baseUrl);
     const metadataUrl = `${issuer}/.well-known/oauth-protected-resource/mcp`;
     const error = reason === 'insufficient_scope' ? 'insufficient_scope' : 'invalid_token';
@@ -693,10 +697,24 @@ class OAuthProvider {
           : reason === 'insufficient_scope'
             ? 'El token no posee el permiso requerido.'
             : 'El token OAuth no es válido.';
-    const authenticate = `Bearer realm="MCP Local Full Control", resource_metadata="${metadataUrl}", scope="${DEFAULT_SCOPE}", error="${error}"`;
+    return `Bearer resource_metadata="${metadataUrl}", scope="${DEFAULT_SCOPE}", error="${error}", error_description="${description}"`;
+  }
+
+  sendProtectedResourceError(req, res, baseUrl, reason = 'invalid_token') {
+    const challenge = this.protectedResourceChallenge(baseUrl, reason);
+    const error = reason === 'insufficient_scope' ? 'insufficient_scope' : 'invalid_token';
+    const description = reason === 'missing_token'
+      ? 'Se requiere autorización OAuth.'
+      : reason === 'wrong_audience'
+        ? 'El token no fue emitido para este servidor MCP.'
+        : reason === 'expired_token'
+          ? 'El token OAuth venció.'
+          : reason === 'insufficient_scope'
+            ? 'El token no posee el permiso requerido.'
+            : 'El token OAuth no es válido.';
     const statusCode = reason === 'insufficient_scope' ? 403 : 401;
     humanEvent('SEGURIDAD', `Acceso rechazado desde ${remoteAddress(req)}: ${description}`);
-    sendJson(res, statusCode, { error, error_description: description }, { 'www-authenticate': authenticate });
+    sendJson(res, statusCode, { error, error_description: description }, { 'www-authenticate': challenge });
   }
 
   async handle(req, res, url, baseUrl) {
@@ -1143,7 +1161,7 @@ ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
           error: 'access_denied',
           error_description: 'El usuario canceló la autorización.',
           state: transaction.state,
-          iss: normalizeBaseUrl(issuer)
+          ...(this.responseIssEnabled ? { iss: normalizeBaseUrl(issuer) } : {})
         }));
         return;
       }
@@ -1175,7 +1193,7 @@ ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
       sendRedirect(res, appendRedirectParams(transaction.redirectUri, {
         code: rawCode,
         state: transaction.state,
-        iss: normalizeBaseUrl(issuer)
+        ...(this.responseIssEnabled ? { iss: normalizeBaseUrl(issuer) } : {})
       }));
     } catch (error) {
       this.sendOAuthError(res, error, true);

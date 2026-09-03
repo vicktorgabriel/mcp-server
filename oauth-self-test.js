@@ -114,11 +114,45 @@ async function main() {
     assert.equal(resourceMetadata.resource, `${base}/mcp`);
     assert.deepEqual(resourceMetadata.authorization_servers, [base]);
 
+    const discoveryInitialize = await fetch(`${base}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 90, method: 'initialize', params: {} })
+    });
+    assert.equal(discoveryInitialize.status, 200);
+    const discoveryInitializeBody = await json(discoveryInitialize);
+    assert.equal(discoveryInitializeBody.result.serverInfo.name, 'mcp-local-control');
+
+    const discoveryTools = await fetch(`${base}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 91, method: 'tools/list', params: {} })
+    });
+    assert.equal(discoveryTools.status, 200);
+    const discoveryToolsBody = await json(discoveryTools);
+    assert.ok(discoveryToolsBody.result.tools.length > 0);
+    for (const tool of discoveryToolsBody.result.tools) {
+      assert.deepEqual(tool.securitySchemes, [{ type: 'oauth2', scopes: ['mcp:tools'] }]);
+      assert.deepEqual(tool._meta && tool._meta.securitySchemes, tool.securitySchemes);
+    }
+
+    const discoveryCall = await fetch(`${base}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 92, method: 'tools/call', params: { name: 'tool_policy_status', arguments: {} } })
+    });
+    assert.equal(discoveryCall.status, 200);
+    const discoveryCallBody = await json(discoveryCall);
+    assert.equal(discoveryCallBody.result.isError, true);
+    assert.ok(Array.isArray(discoveryCallBody.result._meta['mcp/www_authenticate']));
+    assert.match(discoveryCallBody.result._meta['mcp/www_authenticate'][0], /resource_metadata=/);
+    assert.match(discoveryCallBody.result._meta['mcp/www_authenticate'][0], /error_description=/);
+
     const authorizationMetadata = await json(await fetch(`${base}/.well-known/oauth-authorization-server`));
     assert.equal(authorizationMetadata.issuer, base);
     assert.ok(authorizationMetadata.scopes_supported.includes('offline_access'));
     assert.ok(authorizationMetadata.code_challenge_methods_supported.includes('S256'));
-    assert.equal(authorizationMetadata.authorization_response_iss_parameter_supported, true);
+    assert.equal(authorizationMetadata.authorization_response_iss_parameter_supported, undefined);
     assert.equal(authorizationMetadata.resource_indicators_supported, true);
     assert.ok(authorizationMetadata.response_modes_supported.includes('query'));
     assert.equal(authorizationMetadata.client_id_metadata_document_supported, false);
@@ -187,7 +221,7 @@ async function main() {
     assert.equal(authorization.status, 302);
     const callback = new URL(authorization.headers.get('location'));
     assert.equal(callback.searchParams.get('state'), 'estado-prueba');
-    assert.equal(callback.searchParams.get('iss'), base);
+    assert.equal(callback.searchParams.get('iss'), null);
     const code = callback.searchParams.get('code');
     assert.ok(code);
 

@@ -1,10 +1,10 @@
 # MCP Local Full Control
 
-> **4.4.2:** corrige el caso observado en el que un equipo recibe `HTTP 404` al consultar el CIMD de ChatGPT. Para los client IDs oficiales `chatgpt.com/oauth/.../client.json`, el servidor puede reconstruir de forma restringida el callback oficial y continuar con `none + PKCE` sin depender de esa descarga. `private_key_jwt` permanece disponible como opción avanzada, pero ya no se anuncia por defecto para evitar depender del JWKS en equipos con problemas de salida hacia `chatgpt.com`.
+> **4.5.0:** alinea el OAuth con el flujo actual de ChatGPT: DCR + PKCE sigue siendo el modo predeterminado, el servidor deja de anunciar RFC 9207 `iss` por defecto para que ChatGPT use un callback específico por conexión, y cada una de las 72 herramientas publica `securitySchemes` OAuth. `initialize` y `tools/list` pueden consultarse sin token para descubrimiento, mientras que `tools/call` devuelve `_meta["mcp/www_authenticate"]` sin ejecutar la herramienta hasta completar OAuth.
 
 Servidor MCP para administrar un equipo propio desde ChatGPT y otros clientes compatibles. Expone herramientas de archivos, comandos, procesos, servicios, Git, tmux, escritorio, captura de pantalla, cámara, audio y diagnóstico del sistema.
 
-La versión 4.4.2 agrega:
+La versión 4.5.0 agrega:
 
 - un panel de inicio con logo, versión, cantidad de herramientas, perfil, cuenta, confirmaciones y estado de actualización;
 - configuración inicial completa en **una sola terminal**;
@@ -185,6 +185,15 @@ Una dirección HTTP con IP puede servir para pruebas con clientes compatibles, p
 Escucha únicamente en `127.0.0.1`. Sirve para clientes instalados en la misma computadora mediante HTTP o `stdio`, pero ChatGPT Web no puede conectarse directamente a un servidor local.
 
 ## Autenticación
+
+### Compatibilidad actual de ChatGPT (4.5.0)
+
+El modo recomendado sigue siendo **OAuth 2.1**; no es necesario cambiar a sin autenticación ni a un token Bearer. Por defecto se usa **DCR + authorization code + PKCE S256**. El servidor no anuncia `authorization_response_iss_parameter_supported` salvo que `MCP_OAUTH_RESPONSE_ISS=1`, porque RFC 9207 exige devolver `iss` en absolutamente todas las respuestas de autorización. Con el valor predeterminado `0`, ChatGPT registra un callback específico por conexión.
+
+Las herramientas publican `securitySchemes: [{type: "oauth2", scopes: ["mcp:tools"]}]` y el mismo descriptor en `_meta` por compatibilidad. Antes de enlazar la cuenta, `initialize` y `tools/list` pueden responder para que ChatGPT descubra el servidor; ninguna herramienta se ejecuta sin token. Un `tools/call` no autenticado devuelve un resultado de error con `_meta["mcp/www_authenticate"]`, tal como requiere el flujo de linking de ChatGPT.
+
+Después de actualizar desde 4.4.x, **eliminá y recreá la app/conector en ChatGPT una vez** para que ChatGPT registre el nuevo callback DCR. No borres `.env` ni `.private/oauth-state.json`.
+
 
 ### OAuth 2.1 — recomendada
 

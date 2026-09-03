@@ -19,7 +19,7 @@ const { createFullControl } = require('./full-control-tools');
 const { createExtendedTools } = require('./extended-tools');
 const { createAccessPolicy, TOOL_REQUIREMENTS } = require('./access-policy');
 const { describeToolStart, describeToolSuccess, friendlyError, humanEvent, redactText } = require('./human-log');
-const { OAuthProvider, normalizeBaseUrl } = require('./oauth-provider');
+const { DEFAULT_SCOPE, OAuthProvider, normalizeBaseUrl } = require('./oauth-provider');
 const PACKAGE_VERSION = require('./package.json').version;
 
 loadDotEnv();
@@ -340,9 +340,17 @@ function parseCsvSet(value) {
   );
 }
 
+function toolSecuritySchemes() {
+  if (AUTH_MODE === 'oauth') return [{ type: 'oauth2', scopes: [DEFAULT_SCOPE] }];
+  if (AUTH_MODE === 'none') return [{ type: 'noauth' }];
+  return [];
+}
+
 function buildToolMetadata(title, annotations) {
+  const securitySchemes = toolSecuritySchemes();
   return {
     title,
+    ...(securitySchemes.length ? { securitySchemes, _meta: { securitySchemes } } : {}),
     annotations: {
       title,
       ...toolAnnotations(annotations)
@@ -1324,6 +1332,27 @@ function sendAuthError(req, res, baseUrl, authResult) {
   );
 }
 
+function oauthToolAuthResult(baseUrl, reason = 'missing_token') {
+  const challenge = OAUTH_PROVIDER.protectedResourceChallenge(baseUrl, reason);
+  return {
+    content: [{ type: 'text', text: 'Authentication required: connect this MCP app with OAuth to continue.' }],
+    _meta: { 'mcp/www_authenticate': [challenge] },
+    isError: true
+  };
+}
+
+async function handleOauthDiscoveryRequest(mcp, request, baseUrl) {
+  if (!request || request.jsonrpc !== JSONRPC_VERSION) return createError(request && request.id, -32600, 'Invalid JSON-RPC request');
+  if (request.id === undefined) return null;
+  if (request.method === 'initialize' || request.method === 'tools/list' || request.method === 'ping') {
+    return mcp.handle(request, { principal: null, baseUrl, authDiscovery: true });
+  }
+  if (request.method === 'tools/call') {
+    return createResponse(request.id, oauthToolAuthResult(baseUrl, 'missing_token'));
+  }
+  return createError(request.id, -32601, `Method not found: ${request.method}`);
+}
+
 function writeSse(res, event, data) {
   res.write(`event: ${event}\n`);
   res.write(`data: ${typeof data === 'string' ? data : JSON.stringify(data)}\n\n`);
@@ -1359,6 +1388,25 @@ function startHttp() {
       }
 
       const authResult = authenticateHttpRequest(req, baseUrl);
+
+      if (AUTH_MODE === 'oauth' && !authResult.ok && authResult.reason === 'missing_token' && url.pathname === '/mcp' && req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const requests = Array.isArray(body) ? body : [body];
+        const responses = [];
+        for (const request of requests) {
+          const response = await handleOauthDiscoveryRequest(mcp, request, baseUrl);
+          if (response) responses.push(response);
+        }
+        if (responses.length === 0) sendEmpty(res, 202);
+        else sendJson(res, 200, Array.isArray(body) ? responses : responses[0]);
+        return;
+      }
+
+      if (AUTH_MODE === 'oauth' && !authResult.ok && authResult.reason === 'missing_token' && url.pathname === '/tools' && req.method === 'GET') {
+        sendJson(res, 200, { tools: mcp.getTools() });
+        return;
+      }
+
       if (!authResult.ok) {
         sendAuthError(req, res, baseUrl, authResult);
         return;
