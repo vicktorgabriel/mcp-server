@@ -1,10 +1,10 @@
 # MCP Local Full Control
 
-> **4.5.0:** alinea el OAuth con el flujo actual de ChatGPT: DCR + PKCE sigue siendo el modo predeterminado, el servidor deja de anunciar RFC 9207 `iss` por defecto para que ChatGPT use un callback específico por conexión, y cada una de las 72 herramientas publica `securitySchemes` OAuth. `initialize` y `tools/list` pueden consultarse sin token para descubrimiento, mientras que `tools/call` devuelve `_meta["mcp/www_authenticate"]` sin ejecutar la herramienta hasta completar OAuth.
+> **4.5.1:** corrige la visualización de la pantalla OAuth en la interfaz nueva de Plugins. Las páginas `/oauth/authorize` ya no envían `X-Frame-Options: DENY`; el CSP permite framing únicamente desde ChatGPT (`chatgpt.com` y sus subdominios) y mantiene bloqueados otros orígenes. El log de autorización ahora informa si el navegador pidió la página como `iframe`, `document` u otro destino, sin registrar secretos.
 
 Servidor MCP para administrar un equipo propio desde ChatGPT y otros clientes compatibles. Expone herramientas de archivos, comandos, procesos, servicios, Git, tmux, escritorio, captura de pantalla, cámara, audio y diagnóstico del sistema.
 
-La versión 4.5.0 agrega:
+La versión 4.5.1 agrega:
 
 - un panel de inicio con logo, versión, cantidad de herramientas, perfil, cuenta, confirmaciones y estado de actualización;
 - configuración inicial completa en **una sola terminal**;
@@ -186,7 +186,7 @@ Escucha únicamente en `127.0.0.1`. Sirve para clientes instalados en la misma c
 
 ## Autenticación
 
-### Compatibilidad actual de ChatGPT (4.5.0)
+### Compatibilidad actual de ChatGPT (4.5.1)
 
 El modo recomendado sigue siendo **OAuth 2.1**; no es necesario cambiar a sin autenticación ni a un token Bearer. Por defecto se usa **DCR + authorization code + PKCE S256**. El servidor no anuncia `authorization_response_iss_parameter_supported` salvo que `MCP_OAUTH_RESPONSE_ISS=1`, porque RFC 9207 exige devolver `iss` en absolutamente todas las respuestas de autorización. Con el valor predeterminado `0`, ChatGPT registra un callback específico por conexión.
 
@@ -385,6 +385,10 @@ Las operaciones especialmente sensibles exigen frases de confirmación dentro de
 No todas las capacidades existen en todos los equipos. `control_capabilities` indica qué programas, escritorio y privilegios están realmente disponibles. Las herramientas se ejecutan con los permisos del usuario del proceso MCP; usar `root` amplía drásticamente el impacto de una credencial comprometida, por lo que se recomienda un usuario dedicado y OAuth.
 
 ## Resolución de problemas
+
+### El login queda cargando en el modal de ChatGPT
+
+Si el log llega a `Inicio de autorización` pero la interfaz de ChatGPT queda con el botón de inicio de sesión girando y no muestra la página del MCP, revisá la versión. En 4.5.0 y anteriores la página OAuth enviaba `X-Frame-Options: DENY` y `frame-ancestors 'none'`, lo que puede bloquear la interfaz nueva cuando presenta el login dentro de su propia superficie. Desde 4.5.1 se permite framing exclusivamente desde `chatgpt.com`/subdominios y se mantiene CSP restrictivo para los demás orígenes.
 
 ### ngrok funciona manualmente pero el launcher falla
 

@@ -1,6 +1,6 @@
 {
   "name": "mcp-server-local",
-  "version": "4.5.0",
+  "version": "4.5.1",
   "description": "Servidor MCP local/privado con OAuth 2.1 compatible con ChatGPT y 72 herramientas",
   "main": "mcp-server.js",
   "scripts": {

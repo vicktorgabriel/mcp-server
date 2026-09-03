@@ -413,13 +413,20 @@ function sendJson(res, statusCode, payload, extraHeaders = {}) {
 }
 
 function sendHtml(res, statusCode, body) {
-  res.writeHead(statusCode, securityHeaders({
+  const headers = securityHeaders({
     'content-type': 'text/html; charset=utf-8',
     'content-length': Buffer.byteLength(body),
     'cache-control': 'no-store',
     pragma: 'no-cache',
-    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
-  }));
+    'cross-origin-resource-policy': 'cross-origin',
+    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'self' https://chatgpt.com https://*.chatgpt.com https://chat.openai.com; base-uri 'none'"
+  });
+  // ChatGPT's current plugin-linking UI may render the OAuth document inside its
+  // own browser surface. X-Frame-Options: DENY would block that even though the
+  // request successfully reached /oauth/authorize. CSP above restricts framing
+  // to ChatGPT origins instead of allowing arbitrary embedding.
+  delete headers['x-frame-options'];
+  res.writeHead(statusCode, headers);
   res.end(body);
 }
 
@@ -1087,7 +1094,11 @@ ${this.accessRiskNotice()}
       const requestedResources = url.searchParams.getAll('resource');
       let redirectDisplay = 'ausente/inválida';
       try { const parsed = new URL(requestedRedirect); redirectDisplay = `${parsed.origin}${parsed.pathname}`.slice(0, 256); } catch (_) {}
-      humanEvent('OAUTH', `Inicio de autorización desde ${ip}: cliente=${requestedClientId.startsWith('https://chatgpt.com/oauth/') ? 'ChatGPT CIMD' : requestedClientId ? 'cliente DCR/predefinido' : 'ausente'}, redirect=${redirectDisplay}, state=${url.searchParams.has('state') ? 'presente' : 'ausente'}, PKCE=${String(url.searchParams.get('code_challenge_method') || '')}/${String(url.searchParams.get('code_challenge') || '').length}, resource=${requestedResources.length === 1 && timingSafeTextEqual(String(requestedResources[0]).replace(/\/+$/, ''), normalizeResource(issuer)) ? 'correcto' : `no coincide (${requestedResources.length})`}.`);
+      const fetchDest = String(req.headers['sec-fetch-dest'] || 'no informado').slice(0, 32);
+      const fetchSite = String(req.headers['sec-fetch-site'] || 'no informado').slice(0, 32);
+      let refererHost = 'no informado';
+      try { if (req.headers.referer) refererHost = new URL(String(req.headers.referer)).host.slice(0, 128); } catch (_) {}
+      humanEvent('OAUTH', `Inicio de autorización desde ${ip}: cliente=${requestedClientId.startsWith('https://chatgpt.com/oauth/') ? 'ChatGPT CIMD' : requestedClientId ? 'cliente DCR/predefinido' : 'ausente'}, redirect=${redirectDisplay}, state=${url.searchParams.has('state') ? 'presente' : 'ausente'}, PKCE=${String(url.searchParams.get('code_challenge_method') || '')}/${String(url.searchParams.get('code_challenge') || '').length}, resource=${requestedResources.length === 1 && timingSafeTextEqual(String(requestedResources[0]).replace(/\/+$/, ''), normalizeResource(issuer)) ? 'correcto' : `no coincide (${requestedResources.length})`}, presentación=${fetchDest}, origen=${fetchSite}, referencia=${refererHost}.`);
       const request = await this.validateAuthorizationRequest(url, issuer);
       if (Object.keys(this.store.state.authorizationTransactions).length >= this.maxTransactions) {
         this.pruneAuthorizationTransactions();

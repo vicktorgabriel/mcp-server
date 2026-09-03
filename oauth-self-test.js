@@ -193,8 +193,18 @@ async function main() {
     authUrl.searchParams.set('code_challenge_method', 'S256');
     authUrl.searchParams.set('resource', `${base}/mcp`);
 
-    const authorizePage = await fetch(authUrl);
+    const authorizePage = await fetch(authUrl, {
+      headers: {
+        'sec-fetch-dest': 'iframe',
+        'sec-fetch-site': 'cross-site',
+        referer: 'https://chatgpt.com/'
+      }
+    });
     assert.equal(authorizePage.status, 200);
+    assert.equal(authorizePage.headers.get('x-frame-options'), null, 'OAuth UI must not be blocked by X-Frame-Options');
+    assert.equal(authorizePage.headers.get('cross-origin-resource-policy'), 'cross-origin');
+    assert.match(authorizePage.headers.get('content-security-policy') || '', /frame-ancestors[^;]*https:\/\/chatgpt\.com/);
+    assert.match(authorizePage.headers.get('content-security-policy') || '', /https:\/\/\*\.chatgpt\.com/);
     const page = await authorizePage.text();
     const transaction = page.match(/name="transaction" value="([^"]+)"/);
     assert.ok(transaction && transaction[1]);
