@@ -231,6 +231,36 @@ function validateCimdClientId(raw, allowedHosts) {
   return parsed.toString();
 }
 
+function officialChatGptCimdFallback(rawClientId) {
+  let parsed;
+  try { parsed = new URL(String(rawClientId || '')); }
+  catch (_) { return null; }
+  if (parsed.protocol !== 'https:' || parsed.hostname.toLowerCase() !== 'chatgpt.com' || parsed.search || parsed.hash) return null;
+
+  let redirectUri = '';
+  if (parsed.pathname === '/oauth/client.json') {
+    redirectUri = 'https://chatgpt.com/connector_platform_oauth_redirect';
+  } else {
+    const match = parsed.pathname.match(/^\/oauth\/([A-Za-z0-9_-]{6,256})\/client\.json$/);
+    if (!match) return null;
+    redirectUri = `https://chatgpt.com/connector/oauth/${match[1]}`;
+  }
+
+  return {
+    client_id: parsed.toString(),
+    client_uri: 'https://chatgpt.com/',
+    redirect_uris: [redirectUri],
+    token_endpoint_auth_method: 'private_key_jwt',
+    token_endpoint_auth_methods_supported: ['none', 'private_key_jwt'],
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+    client_name: 'ChatGPT',
+    token_endpoint_auth_signing_alg: 'RS256',
+    jwks_uri: 'https://chatgpt.com/oauth/jwks.json',
+    _mcpFallback: true
+  };
+}
+
 async function defaultCimdFetcher(url, { timeoutMs = 5000, maxBytes = 32768 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -239,7 +269,7 @@ async function defaultCimdFetcher(url, { timeoutMs = 5000, maxBytes = 32768 } = 
       method: 'GET',
       redirect: 'error',
       signal: controller.signal,
-      headers: { accept: 'application/json' }
+      headers: { accept: 'application/json', 'user-agent': 'MCP-Server OAuth client metadata fetcher' }
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const contentLength = Number(response.headers.get('content-length') || 0);
@@ -525,6 +555,9 @@ class OAuthProvider {
     this.cimdTimeoutMs = boundedNumber(options.cimdTimeoutMs || process.env.MCP_OAUTH_CIMD_TIMEOUT_MS, 5000, 1000, 15000);
     this.cimdMaxBytes = boundedNumber(options.cimdMaxBytes || process.env.MCP_OAUTH_CIMD_MAX_BYTES, 32768, 4096, 262144);
     this.cimdCacheTtl = boundedNumber(options.cimdCacheTtl || process.env.MCP_OAUTH_CIMD_CACHE_TTL, 21600, 60, 86400);
+    this.privateKeyJwtEnabled = options.privateKeyJwtEnabled !== undefined
+      ? Boolean(options.privateKeyJwtEnabled)
+      : String(process.env.MCP_OAUTH_PRIVATE_KEY_JWT || '0') === '1';
     this.jwksFetcher = typeof options.jwksFetcher === 'function' ? options.jwksFetcher : this.cimdFetcher;
     this.jwksCacheTtl = boundedNumber(options.jwksCacheTtl || process.env.MCP_OAUTH_JWKS_CACHE_TTL, 3600, 60, 21600);
     this.jwksCache = new Map();
@@ -569,8 +602,18 @@ class OAuthProvider {
       response_types_supported: ['code'],
       response_modes_supported: ['query'],
       grant_types_supported: ['authorization_code', 'refresh_token'],
-      token_endpoint_auth_methods_supported: ['none', 'private_key_jwt', 'client_secret_basic', 'client_secret_post'],
-      revocation_endpoint_auth_methods_supported: ['none', 'private_key_jwt', 'client_secret_basic', 'client_secret_post'],
+      token_endpoint_auth_methods_supported: [
+        'none',
+        ...(this.privateKeyJwtEnabled ? ['private_key_jwt'] : []),
+        'client_secret_basic',
+        'client_secret_post'
+      ],
+      revocation_endpoint_auth_methods_supported: [
+        'none',
+        ...(this.privateKeyJwtEnabled ? ['private_key_jwt'] : []),
+        'client_secret_basic',
+        'client_secret_post'
+      ],
       code_challenge_methods_supported: ['S256'],
       authorization_response_iss_parameter_supported: true,
       resource_indicators_supported: true,
@@ -600,7 +643,8 @@ class OAuthProvider {
       activeAccessTokens: Object.keys(this.store.state.accessTokens).length,
       activeRefreshTokens: Object.keys(this.store.state.refreshTokens).length,
       dynamicRegistration: this.dynamicRegistration,
-      clientIdMetadataDocuments: this.cimdEnabled
+      clientIdMetadataDocuments: this.cimdEnabled,
+      privateKeyJwt: this.privateKeyJwtEnabled
     };
   }
 
@@ -873,8 +917,12 @@ ${this.accessRiskNotice()}
     try {
       metadata = await this.cimdFetcher(cimdUrl, { timeoutMs: this.cimdTimeoutMs, maxBytes: this.cimdMaxBytes });
     } catch (error) {
-      humanEvent('SEGURIDAD', `No se pudo verificar el documento CIMD ${cimdUrl}: ${redactText(error.message)}`);
-      throw new OAuthError('unauthorized_client', 'No se pudo verificar la identidad OAuth de ChatGPT. Reintentá la conexión.', 400);
+      metadata = officialChatGptCimdFallback(cimdUrl);
+      if (!metadata) {
+        humanEvent('SEGURIDAD', `No se pudo verificar el documento CIMD ${cimdUrl}: ${redactText(error.message)}`);
+        throw new OAuthError('unauthorized_client', 'No se pudo verificar la identidad OAuth del cliente. Reintentá la conexión.', 400);
+      }
+      humanEvent('OAUTH', `El documento CIMD de ChatGPT no respondió (${redactText(error.message)}). Se usará el perfil oficial integrado para este client_id y se mantendrán PKCE, redirect_uri y resource obligatorios.`);
     }
     if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
       throw new OAuthError('unauthorized_client', 'El documento CIMD no contiene metadatos OAuth válidos.');
@@ -904,19 +952,20 @@ ${this.accessRiskNotice()}
     const clientMethods = Array.isArray(metadata.token_endpoint_auth_methods_supported)
       ? [...new Set(metadata.token_endpoint_auth_methods_supported.map(String))]
       : [String(metadata.token_endpoint_auth_method || 'none')];
-    const supportedClientMethods = clientMethods.filter((method) => ['none', 'private_key_jwt'].includes(method));
+    const serverCimdMethods = new Set(['none', ...(this.privateKeyJwtEnabled ? ['private_key_jwt'] : [])]);
+    const supportedClientMethods = clientMethods.filter((method) => serverCimdMethods.has(method));
     if (supportedClientMethods.length === 0) {
       throw new OAuthError('unauthorized_client', 'El cliente CIMD no comparte un método de autenticación de token compatible.');
     }
     const clientOrigin = new URL(cimdUrl).origin;
-    const jwksUri = clientMethods.includes('private_key_jwt')
+    const jwksUri = supportedClientMethods.includes('private_key_jwt')
       ? validateSameOriginHttpsUrl(metadata.jwks_uri, clientOrigin)
       : '';
-    if (clientMethods.includes('private_key_jwt') && !jwksUri) {
+    if (supportedClientMethods.includes('private_key_jwt') && !jwksUri) {
       throw new OAuthError('unauthorized_client', 'El cliente CIMD anuncia private_key_jwt pero no publica un jwks_uri HTTPS válido en su mismo origen.');
     }
     const signingAlg = String(metadata.token_endpoint_auth_signing_alg || 'RS256');
-    if (clientMethods.includes('private_key_jwt') && signingAlg !== 'RS256') {
+    if (supportedClientMethods.includes('private_key_jwt') && signingAlg !== 'RS256') {
       throw new OAuthError('unauthorized_client', 'El servidor sólo admite RS256 para private_key_jwt.');
     }
 
@@ -945,6 +994,7 @@ ${this.accessRiskNotice()}
       clientUri: typeof metadata.client_uri === 'string' ? metadata.client_uri.slice(0, 2048) : '',
       registrationType: 'cimd',
       cimdMetadataUrl: cimdUrl,
+      cimdMetadataSource: metadata._mcpFallback ? 'official-chatgpt-fallback' : 'remote',
       cimdValidatedAt: now,
       issuedAt: existing && existing.issuedAt ? existing.issuedAt : now,
       createdAt: existing && existing.createdAt ? existing.createdAt : new Date().toISOString()
@@ -1014,6 +1064,12 @@ ${this.accessRiskNotice()}
     try {
       this.refreshStore();
       this.assertConfigured();
+      const requestedClientId = String(url.searchParams.get('client_id') || '');
+      const requestedRedirect = String(url.searchParams.get('redirect_uri') || '');
+      const requestedResources = url.searchParams.getAll('resource');
+      let redirectDisplay = 'ausente/inválida';
+      try { const parsed = new URL(requestedRedirect); redirectDisplay = `${parsed.origin}${parsed.pathname}`.slice(0, 256); } catch (_) {}
+      humanEvent('OAUTH', `Inicio de autorización desde ${ip}: cliente=${requestedClientId.startsWith('https://chatgpt.com/oauth/') ? 'ChatGPT CIMD' : requestedClientId ? 'cliente DCR/predefinido' : 'ausente'}, redirect=${redirectDisplay}, state=${url.searchParams.has('state') ? 'presente' : 'ausente'}, PKCE=${String(url.searchParams.get('code_challenge_method') || '')}/${String(url.searchParams.get('code_challenge') || '').length}, resource=${requestedResources.length === 1 && timingSafeTextEqual(String(requestedResources[0]).replace(/\/+$/, ''), normalizeResource(issuer)) ? 'correcto' : `no coincide (${requestedResources.length})`}.`);
       const request = await this.validateAuthorizationRequest(url, issuer);
       if (Object.keys(this.store.state.authorizationTransactions).length >= this.maxTransactions) {
         this.pruneAuthorizationTransactions();
@@ -1242,9 +1298,11 @@ ${errorMessage ? `<p class="error">${htmlEscape(errorMessage)}</p>` : ''}
     if (!client) throw new OAuthError('invalid_client', 'Cliente OAuth desconocido. Si ChatGPT reutiliza un client_id DCR anterior, eliminá y recreá la app.', 401);
     const actualMethod = detectTokenAuthMethod(req, form);
     if (client.registrationType === 'cimd') {
-      const allowedMethods = Array.isArray(client.tokenEndpointAuthMethods) && client.tokenEndpointAuthMethods.length
+      const declaredMethods = Array.isArray(client.tokenEndpointAuthMethods) && client.tokenEndpointAuthMethods.length
         ? client.tokenEndpointAuthMethods
         : [client.tokenEndpointAuthMethod || 'none'];
+      const serverMethods = new Set(['none', ...(this.privateKeyJwtEnabled ? ['private_key_jwt'] : [])]);
+      const allowedMethods = declaredMethods.filter((method) => serverMethods.has(method));
       if (!allowedMethods.includes(actualMethod)) {
         throw new OAuthError('invalid_client', `El método ${actualMethod} no está permitido por el documento CIMD.`, 401);
       }

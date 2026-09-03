@@ -16,7 +16,7 @@ function authInstructions(mode) {
       'Autenticación: elegí OAuth.',
       'El servidor admite CIMD de ChatGPT y DCR como fallback; no cargues un Client ID manual salvo que uses un cliente pre-registrado.',
       'Con CIMD ChatGPT usa su URL HTTPS de metadatos como client_id y no realiza un POST de registro.',
-      'El token endpoint acepta tanto el modo público PKCE (none) como private_key_jwt; este último se verifica contra el JWKS oficial publicado por ChatGPT.',
+      'El modo predeterminado es cliente público none + PKCE, sin depender de JWKS. private_key_jwt queda disponible como opción avanzada con MCP_OAUTH_PRIVATE_KEY_JWT=1.',
       'Con DCR ChatGPT se registra automáticamente mediante el registration_endpoint publicado.',
       'Al escanear las herramientas se abrirá la página de autorización del MCP.',
       'Ingresá el usuario y la contraseña OAuth que configuraste en el primer inicio, revisá el destino y autorizá.'

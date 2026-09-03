@@ -41,15 +41,15 @@ async function main() {
     const metadata = provider.metadata('https://mcp.example.test');
     assert.equal(metadata.client_id_metadata_document_supported, true);
     assert.ok(metadata.token_endpoint_auth_methods_supported.includes('none'));
-    assert.ok(metadata.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
+    assert.ok(!metadata.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
     assert.ok(metadata.registration_endpoint.endsWith('/oauth/register'), 'DCR must remain available as fallback');
 
     const resolved = await provider.resolveClient(clientId, { redirectUri });
     assert.equal(resolved.clientName, 'ChatGPT');
     assert.equal(resolved.registrationType, 'cimd');
-    assert.equal(resolved.tokenEndpointAuthMethod, 'private_key_jwt');
-    assert.deepEqual(resolved.tokenEndpointAuthMethods, ['none', 'private_key_jwt']);
-    assert.equal(resolved.jwksUri, 'https://chatgpt.com/oauth/jwks.json');
+    assert.equal(resolved.tokenEndpointAuthMethod, 'none');
+    assert.deepEqual(resolved.tokenEndpointAuthMethods, ['none']);
+    assert.equal(resolved.jwksUri, '');
     assert.deepEqual(resolved.redirectUris, [redirectUri]);
     assert.equal(fetches, 1);
 
@@ -118,8 +118,8 @@ async function main() {
     });
     const migrated = await migrationProvider.resolveClient(clientId, { redirectUri });
     assert.equal(legacyRefreshes, 1, 'a 4.3-era CIMD record must refresh immediately after upgrading');
-    assert.ok(migrated.tokenEndpointAuthMethods.includes('private_key_jwt'));
-    assert.equal(migrated.jwksUri, document.jwks_uri);
+    assert.deepEqual(migrated.tokenEndpointAuthMethods, ['none']);
+    assert.equal(migrated.jwksUri, '');
 
     const badRedirectProvider = new OAuthProvider({
       storePath: path.join(temp, 'bad-redirect.json'),
@@ -146,6 +146,7 @@ async function main() {
     const privateOnlyProvider = new OAuthProvider({
       storePath: path.join(temp, 'private-only.json'),
       cimdEnabled: true,
+      privateKeyJwtEnabled: true,
       cimdHosts: new Set(['chatgpt.com']),
       cimdFetcher: async () => ({
         ...document,
@@ -155,6 +156,41 @@ async function main() {
     const privateOnly = await privateOnlyProvider.resolveClient(clientId, { redirectUri });
     assert.deepEqual(privateOnly.tokenEndpointAuthMethods, ['private_key_jwt']);
     assert.equal(privateOnly.tokenEndpointAuthMethod, 'private_key_jwt');
+
+    const fallbackStableProvider = new OAuthProvider({
+      storePath: path.join(temp, 'fallback-stable.json'),
+      cimdEnabled: true,
+      cimdHosts: new Set(['chatgpt.com']),
+      cimdFetcher: async () => { throw new Error('HTTP 404'); }
+    });
+    const fallbackStable = await fallbackStableProvider.resolveClient(clientId, { redirectUri });
+    assert.equal(fallbackStable.cimdMetadataSource, 'official-chatgpt-fallback');
+    assert.equal(fallbackStable.tokenEndpointAuthMethod, 'none');
+    assert.deepEqual(fallbackStable.redirectUris, [redirectUri]);
+    const fallbackAuthUrl = new URL('https://mcp.example.test/oauth/authorize');
+    fallbackAuthUrl.searchParams.set('client_id', clientId);
+    fallbackAuthUrl.searchParams.set('redirect_uri', redirectUri);
+    fallbackAuthUrl.searchParams.set('response_type', 'code');
+    fallbackAuthUrl.searchParams.set('scope', 'mcp:tools offline_access');
+    fallbackAuthUrl.searchParams.set('code_challenge', 'B'.repeat(43));
+    fallbackAuthUrl.searchParams.set('code_challenge_method', 'S256');
+    fallbackAuthUrl.searchParams.set('resource', 'https://mcp.example.test/mcp');
+    const fallbackValidated = await fallbackStableProvider.validateAuthorizationRequest(fallbackAuthUrl, 'https://mcp.example.test');
+    assert.equal(fallbackValidated.clientId, clientId);
+
+    const callbackId = 'callback_ABC123xyz';
+    const callbackClientId = `https://chatgpt.com/oauth/${callbackId}/client.json`;
+    const callbackRedirect = `https://chatgpt.com/connector/oauth/${callbackId}`;
+    const fallbackCallbackProvider = new OAuthProvider({
+      storePath: path.join(temp, 'fallback-callback.json'),
+      cimdEnabled: true,
+      cimdHosts: new Set(['chatgpt.com']),
+      cimdFetcher: async () => { throw new Error('HTTP 404'); }
+    });
+    const fallbackCallback = await fallbackCallbackProvider.resolveClient(callbackClientId, { redirectUri: callbackRedirect });
+    assert.equal(fallbackCallback.cimdMetadataSource, 'official-chatgpt-fallback');
+    assert.deepEqual(fallbackCallback.redirectUris, [callbackRedirect]);
+    assert.deepEqual(fallbackCallback.tokenEndpointAuthMethods, ['none']);
 
     process.stdout.write('oauth_cimd=OK\n');
   } finally {

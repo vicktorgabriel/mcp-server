@@ -1,10 +1,10 @@
 # MCP Local Full Control
 
-> **4.4.0:** completa el canje OAuth de ChatGPT con **CIMD + `private_key_jwt`**. El token endpoint continúa aceptando el cliente público `none` con PKCE y ahora también verifica las aserciones RS256 de ChatGPT contra su JWKS HTTPS. Los logs del token exchange indican método, resource y estado de PKCE sin registrar códigos, verifier, aserciones ni tokens.
+> **4.4.1:** corrige el caso observado en el que un equipo recibe `HTTP 404` al consultar el CIMD de ChatGPT. Para los client IDs oficiales `chatgpt.com/oauth/.../client.json`, el servidor puede reconstruir de forma restringida el callback oficial y continuar con `none + PKCE` sin depender de esa descarga. `private_key_jwt` permanece disponible como opción avanzada, pero ya no se anuncia por defecto para evitar depender del JWKS en equipos con problemas de salida hacia `chatgpt.com`.
 
 Servidor MCP para administrar un equipo propio desde ChatGPT y otros clientes compatibles. Expone herramientas de archivos, comandos, procesos, servicios, Git, tmux, escritorio, captura de pantalla, cámara, audio y diagnóstico del sistema.
 
-La versión 4.4 agrega:
+La versión 4.4.1 agrega:
 
 - un panel de inicio con logo, versión, cantidad de herramientas, perfil, cuenta, confirmaciones y estado de actualización;
 - configuración inicial completa en **una sola terminal**;
@@ -208,7 +208,9 @@ En el asistente elegí OAuth, definí un usuario y una contraseña distinta de l
 
 El proveedor integrado está orientado a una instalación privada y de un solo administrador. Para publicar un servicio multiusuario, empresarial o de terceros, conviene usar un proveedor de identidad establecido y auditar su configuración por separado.
 
-El modo integrado anuncia **CIMD y DCR al mismo tiempo**. Para CIMD acepta por defecto documentos alojados en `chatgpt.com`, valida que el `client_id` coincida exactamente con la URL, comprueba las `redirect_uris`, PKCE y los métodos de autenticación publicados. El token endpoint acepta la intersección compatible que ChatGPT declara actualmente: `none` para el cliente público con PKCE y `private_key_jwt` para autenticación firmada. En `private_key_jwt` verifica RS256, `iss`/`sub`, audiencia, vigencia y replay, y obtiene la clave pública únicamente del `jwks_uri` HTTPS del mismo origen que el documento CIMD. No se guarda ningún `client_secret` de ChatGPT. La lista de hosts CIMD se puede ampliar conscientemente con `MCP_OAUTH_CIMD_HOSTS`, pero mantenerla restringida evita convertir el servidor OAuth en un fetcher arbitrario.
+El modo integrado anuncia **CIMD y DCR al mismo tiempo**. Para CIMD acepta por defecto únicamente `chatgpt.com`, valida que el `client_id` sea HTTPS, comprueba `redirect_uri`, PKCE y `resource`. El modo predeterminado del token endpoint es `none + PKCE`, que ChatGPT soporta oficialmente y no necesita `client_secret` ni JWKS. `private_key_jwt` queda implementado pero se habilita sólo con `MCP_OAUTH_PRIVATE_KEY_JWT=1`; entonces se verifican RS256, `iss`/`sub`, audiencia, vigencia, replay y el JWKS HTTPS del mismo origen.
+
+Si la descarga del CIMD oficial falla (por ejemplo, `HTTP 404` desde una red concreta), 4.4.1 reconoce exclusivamente los dos formatos que OpenAI documenta: el client ID estable `https://chatgpt.com/oauth/client.json` y el formato con `callback_id`. El fallback deriva únicamente el callback oficial `chatgpt.com`, no acepta hosts arbitrarios y mantiene obligatorios PKCE y `resource`. DCR continúa disponible como alternativa.
 
 Comandos de administración:
 
@@ -394,6 +396,12 @@ El asistente guarda el ejecutable, el authtoken privado y el endpoint correcto p
 ```
 
 Un 502 suele indicar que el túnel existe pero no puede llegar al servidor local. El estado correcto muestra health local operativo y ngrok apuntando a `http://127.0.0.1:3000` o al puerto elegido.
+
+### CIMD devuelve HTTP 404 y no aparece el login
+
+Si el log contiene `No se pudo verificar el documento CIMD ... HTTP 404`, las versiones anteriores a 4.4.1 cortaban la autorización antes de mostrar la pantalla de usuario/contraseña. Desde 4.4.1, los client IDs oficiales de ChatGPT tienen un fallback restringido y el flujo continúa con `none + PKCE`; no hace falta borrar `.env` ni `.private`.
+
+El modo firmado `private_key_jwt` puede activarse manualmente con `MCP_OAUTH_PRIVATE_KEY_JWT=1`, pero el valor predeterminado es `0` para evitar una segunda dependencia de red hacia el JWKS cuando el equipo ya tiene problemas para consultar `chatgpt.com`.
 
 ### “El cliente OAuth no está registrado”
 

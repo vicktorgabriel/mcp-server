@@ -1,6 +1,6 @@
 {
   "name": "mcp-server-local",
-  "version": "4.4.0",
+  "version": "4.4.1",
   "description": "Servidor MCP local/privado con OAuth 2.1 CIMD/DCR, private_key_jwt y 72 herramientas",
   "main": "mcp-server.js",
   "scripts": {

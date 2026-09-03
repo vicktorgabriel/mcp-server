@@ -83,6 +83,7 @@ async function main() {
     const provider = new OAuthProvider({
       storePath,
       cimdEnabled: true,
+      privateKeyJwtEnabled: true,
       cimdHosts: new Set(['chatgpt.com']),
       cimdFetcher: async (url) => {
         assert.equal(url, clientId);
