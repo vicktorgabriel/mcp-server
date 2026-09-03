@@ -125,6 +125,13 @@ grep -Fq "$TOKEN" "$PRIVATE/ngrok.yml"
 ! grep -Fq "$PASSWORD" "$PRIVATE/oauth-state.json"
 ! grep -Fq "$PASSWORD" "$OUTPUT"
 node -e 'const s=require(process.argv[1]); if(!s.admin || s.admin.username!=="tester" || !String(s.admin.passwordHash||"").startsWith("scrypt$")) process.exit(1)' "$PRIVATE/oauth-state.json"
+(
+  cd "$TEST_ROOT/repo"
+  PATH="$TEST_ROOT/bin:$PATH" MCP_CONFIG_SOURCE=file MCP_INSTALL_OPTIONAL=0 MCP_SETUP_QUIET=1 \
+    ./setup-mcp.sh >"$TEST_ROOT/oauth-validation.out" 2>&1
+)
+! grep -Eq 'EPIPE|Unhandled .error. event|todavía no tiene usuario' "$TEST_ROOT/oauth-validation.out"
+echo 'oauth_setup_validation=OK'
 
 echo 'first_run_ngrok_oauth=OK'
 

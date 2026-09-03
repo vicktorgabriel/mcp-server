@@ -9,6 +9,15 @@ const ROOT = __dirname;
 const env = parseDotEnv();
 const storePath = path.resolve(process.env.MCP_OAUTH_STORE || env.MCP_OAUTH_STORE || path.join(ROOT, '.private', 'oauth-state.json'));
 
+function ignoreBrokenPipe(stream) {
+  stream.on('error', (error) => {
+    if (error && error.code === 'EPIPE') process.exit(0);
+    throw error;
+  });
+}
+
+ignoreBrokenPipe(process.stdout);
+
 function argument(name, fallback = '') {
   const index = process.argv.indexOf(name);
   if (index < 0 || index + 1 >= process.argv.length) return fallback;
@@ -62,17 +71,39 @@ function readHidden(prompt) {
   });
 }
 
-function printStatus() {
+function statusSnapshot() {
   const store = new OAuthStateStore(storePath);
   const admin = store.state.admin;
   const now = Math.floor(Date.now() / 1000);
   const active = (collection) => Object.values(collection).filter((record) => Number(record.expiresAt || 0) > now).length;
-  process.stdout.write(`Configurado: ${admin ? 'sí' : 'no'}\n`);
-  process.stdout.write(`Usuario: ${admin ? admin.username : '-'}\n`);
-  process.stdout.write(`Clientes registrados: ${Object.keys(store.state.clients).length}\n`);
-  process.stdout.write(`Sesiones activas: ${active(store.state.accessTokens)}\n`);
-  process.stdout.write(`Renovaciones activas: ${active(store.state.refreshTokens)}\n`);
-  process.stdout.write(`Archivo privado: ${store.filePath}\n`);
+  return {
+    configured: Boolean(admin && admin.username && admin.passwordHash),
+    username: admin ? admin.username : '',
+    registeredClients: Object.keys(store.state.clients).length,
+    activeSessions: active(store.state.accessTokens),
+    activeRefreshTokens: active(store.state.refreshTokens),
+    storePath: store.filePath
+  };
+}
+
+function printStatus({ json = false } = {}) {
+  const status = statusSnapshot();
+  if (json) {
+    process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(`${[
+    `Configurado: ${status.configured ? 'sí' : 'no'}`,
+    `Usuario: ${status.username || '-'}`,
+    `Clientes registrados: ${status.registeredClients}`,
+    `Sesiones activas: ${status.activeSessions}`,
+    `Renovaciones activas: ${status.activeRefreshTokens}`,
+    `Archivo privado: ${status.storePath}`
+  ].join('\n')}\n`);
+}
+
+function checkConfigured() {
+  process.exitCode = statusSnapshot().configured ? 0 : 1;
 }
 
 function resetSessions({ clients = false } = {}) {
@@ -106,7 +137,11 @@ async function main() {
       await configure();
       break;
     case 'status':
-      printStatus();
+      printStatus({ json: process.argv.includes('--json') });
+      break;
+    case 'is-configured':
+    case 'check-configured':
+      checkConfigured();
       break;
     case 'reset-sessions':
       resetSessions({ clients: false });
@@ -115,7 +150,7 @@ async function main() {
       resetSessions({ clients: true });
       break;
     default:
-      process.stderr.write('Uso: node oauth-admin.js configure|status|reset-sessions|reset-all\n');
+      process.stderr.write('Uso: node oauth-admin.js configure|status [--json]|is-configured|reset-sessions|reset-all\n');
       process.exitCode = 2;
   }
 }

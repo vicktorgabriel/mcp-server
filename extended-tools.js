@@ -291,9 +291,9 @@ destination.mkdir(parents=True, exist_ok=True)
 count=0
 total_bytes=0
 
+
 def target_for(name):
-    global count
-    normalized=name.replace('\\\\','/')
+    normalized=name.replace('\\','/')
     pure=PurePosixPath(normalized)
     if pure.is_absolute() or '..' in pure.parts or not pure.parts:
         raise RuntimeError(f'unsafe archive entry: {name}')
@@ -301,23 +301,31 @@ def target_for(name):
     resolved=target.resolve(strict=False)
     try: resolved.relative_to(destination)
     except ValueError: raise RuntimeError(f'archive entry escapes destination: {name}')
+    return target
+
+
+def prepare_parent(target, name):
     parent=target.parent
     parent.mkdir(parents=True, exist_ok=True)
     parent_resolved=parent.resolve()
     try: parent_resolved.relative_to(destination)
     except ValueError: raise RuntimeError(f'archive parent escapes destination: {name}')
-    count += 1
-    if count > 200000: raise RuntimeError('archive contains too many entries')
-    return target
+
 
 if zipfile.is_zipfile(archive):
     with zipfile.ZipFile(archive) as zf:
+        validated=[]
         for info in zf.infolist():
             mode=(info.external_attr >> 16) & 0xffff
             if stat.S_ISLNK(mode): raise RuntimeError(f'symbolic links are not allowed: {info.filename}')
-            total_bytes += int(info.file_size or 0)
-            if total_bytes > max_bytes: raise RuntimeError(f'archive exceeds extraction limit: {max_bytes} bytes')
             target=target_for(info.filename)
+            total_bytes += int(info.file_size or 0)
+            count += 1
+            if count > 200000: raise RuntimeError('archive contains too many entries')
+            if total_bytes > max_bytes: raise RuntimeError(f'archive exceeds extraction limit: {max_bytes} bytes')
+            validated.append((info, target, mode))
+        for info, target, mode in validated:
+            prepare_parent(target, info.filename)
             if info.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
             else:
@@ -325,25 +333,30 @@ if zipfile.is_zipfile(archive):
                 if mode: os.chmod(target, mode & 0o777)
 else:
     with tarfile.open(archive, 'r:*') as tf:
+        validated=[]
         for member in tf.getmembers():
             if member.issym() or member.islnk() or member.isdev() or member.isfifo():
                 raise RuntimeError(f'links/devices are not allowed: {member.name}')
-            total_bytes += int(member.size or 0)
-            if total_bytes > max_bytes: raise RuntimeError(f'archive exceeds extraction limit: {max_bytes} bytes')
+            if not member.isdir() and not member.isfile():
+                raise RuntimeError(f'unsupported archive entry: {member.name}')
             target=target_for(member.name)
+            total_bytes += int(member.size or 0)
+            count += 1
+            if count > 200000: raise RuntimeError('archive contains too many entries')
+            if total_bytes > max_bytes: raise RuntimeError(f'archive exceeds extraction limit: {max_bytes} bytes')
+            validated.append((member, target))
+        for member, target in validated:
+            prepare_parent(target, member.name)
             if member.isdir():
                 target.mkdir(parents=True, exist_ok=True)
                 os.chmod(target, member.mode & 0o777)
-            elif member.isfile():
+            else:
                 source=tf.extractfile(member)
                 if source is None: raise RuntimeError(f'cannot read archive member: {member.name}')
                 with source, open(target, 'wb') as dst: shutil.copyfileobj(source, dst)
                 os.chmod(target, member.mode & 0o777)
-            else:
-                raise RuntimeError(f'unsupported archive entry: {member.name}')
 print(json.dumps({'archive': str(archive), 'destination': str(destination), 'entries': count, 'bytes': total_bytes}))
 `;
-
 function createExtendedTools({ resolvePath, buildToolMetadata, textResult }) {
   const ro = { readOnlyHint: true, openWorldHint: true };
   const rw = { destructiveHint: true, idempotentHint: false, openWorldHint: true };

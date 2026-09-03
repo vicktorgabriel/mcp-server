@@ -58,6 +58,9 @@ node extended-tools-self-test.js
 printf '\n== Authentication modes ==\n'
 node auth-mode-self-test.js
 
+printf '\n== OAuth administration CLI ==\n'
+node oauth-admin-self-test.js
+
 printf '\n== OAuth end-to-end ==\n'
 node oauth-self-test.js
 
@@ -155,7 +158,7 @@ printf '\n== Temporary supervisor and readable logs ==\n'
   HEALTH="$(curl -fsS "http://127.0.0.1:$TEST_PORT/health")"
   printf '%s' "$HEALTH" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const x=JSON.parse(s);if(!x.ok||x.auth!=="none"||x.allowedRoots!==undefined)process.exit(1);});'
   STATUS_JSON="$(PORT="$TEST_PORT" HOST=127.0.0.1 MCP_EXPOSURE_MODE=local MCP_AUTH_MODE=none MCP_RUNTIME_DIR="$TEST_DIR/runtime" MCP_HUMAN_LOG="$TEST_DIR/runtime/events.log" node runtime-diagnostics.js status)"
-  printf '%s' "$STATUS_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const j=JSON.parse(s);const r=j.runtime&&j.runtime.status;if(!j.ok||!j.launch.temporary||j.launch.persistent||j.config.authMode!=="none"||!r||r.version!=="4.2.0"||r.toolCount!==72||r.totalToolCount!==72||r.runAsRoot!==false||r.criticalConfirmations!==true) {console.error(j);process.exit(1)}});'
+  printf '%s' "$STATUS_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const expected=require("./package.json").version;const j=JSON.parse(s);const r=j.runtime&&j.runtime.status;if(!j.ok||!j.launch.temporary||j.launch.persistent||j.config.authMode!=="none"||!r||r.version!==expected||r.toolCount!==72||r.totalToolCount!==72||r.runAsRoot!==false||r.criticalConfirmations!==true) {console.error(j);process.exit(1)}});'
   VIEW="$(PORT="$TEST_PORT" HOST=127.0.0.1 MCP_EXPOSURE_MODE=local MCP_AUTH_MODE=none MCP_RUNTIME_DIR="$TEST_DIR/runtime" MCP_HUMAN_LOG="$TEST_DIR/runtime/events.log" node log-viewer.js --lines 40)"
   grep -q 'ACTIVIDAD DEL SERVIDOR MCP' <<<"$VIEW"
   grep -Eq 'Servidor MCP( v[^ ]+)? (local )?listo' "$TEST_DIR/runtime/events.log"

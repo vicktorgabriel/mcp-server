@@ -1,5 +1,7 @@
 # MCP Local Full Control
 
+> **4.2.1:** corrige la validación OAuth en Node.js 24. El inicio ya no conecta la salida detallada de `oauth-admin.js status` con `grep -q`; utiliza una comprobación silenciosa y tolera correctamente una tubería cerrada, evitando el falso mensaje de que faltan usuario o contraseña.
+
 Servidor MCP para administrar un equipo propio desde ChatGPT y otros clientes compatibles. Expone herramientas de archivos, comandos, procesos, servicios, Git, tmux, escritorio, captura de pantalla, cámara, audio y diagnóstico del sistema.
 
 La versión 4.2 agrega:

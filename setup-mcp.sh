@@ -223,10 +223,10 @@ fi
 if [ "$AUTH_MODE" = 'oauth' ]; then
   [ -n "$PUBLIC_URL" ] || { err 'OAuth requiere una URL pública estable. Ejecutá ./mcpctl.sh configure.'; exit 1; }
   case "$PUBLIC_URL" in https://*) ;; *) err 'OAuth requiere HTTPS. Elegí ngrok o una URL HTTPS propia.'; exit 1 ;; esac
-  node oauth-admin.js status | grep -q 'Configurado: sí' || {
+  if ! node oauth-admin.js is-configured >/dev/null; then
     err 'OAuth está seleccionado pero todavía no tiene usuario/contraseña. Ejecutá ./mcpctl.sh configure.'
     exit 1
-  }
+  fi
 elif [ "$AUTH_MODE" = 'bearer' ]; then
   BEARER_VALUE="$(read_config MCP_AUTH_TOKEN '')"
   if [ -z "$BEARER_VALUE" ]; then
