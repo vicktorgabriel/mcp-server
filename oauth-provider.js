@@ -547,7 +547,7 @@ class OAuthProvider {
       : String(process.env.MCP_OAUTH_DYNAMIC_REGISTRATION || '1') !== '0';
     this.cimdEnabled = options.cimdEnabled !== undefined
       ? Boolean(options.cimdEnabled)
-      : String(process.env.MCP_OAUTH_CIMD || '1') !== '0';
+      : String(process.env.MCP_OAUTH_CIMD || '0') !== '0';
     this.cimdHosts = options.cimdHosts instanceof Set
       ? options.cimdHosts
       : parseCimdHosts(options.cimdHosts || process.env.MCP_OAUTH_CIMD_HOSTS || 'chatgpt.com');

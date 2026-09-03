@@ -449,7 +449,7 @@ configure_auth() {
         'MCP_AUTH_TOKEN=' \
         'MCP_AUTH_TOKEN_FILE=.private/bearer-token.txt' \
         'MCP_OAUTH_STORE=.private/oauth-state.json' \
-        'MCP_OAUTH_CIMD=1' \
+        'MCP_OAUTH_CIMD=0' \
         'MCP_OAUTH_CIMD_HOSTS=chatgpt.com' \
         'MCP_OAUTH_CIMD_TIMEOUT_MS=5000' \
         'MCP_OAUTH_CIMD_CACHE_TTL=21600' \
