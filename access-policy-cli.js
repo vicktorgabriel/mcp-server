@@ -22,7 +22,7 @@ function main() {
   if (summary.allowlist.length) process.stdout.write(`Lista permitida:       ${summary.allowlist.join(', ')}\n`);
   for (const warning of summary.warnings) process.stdout.write(`Aviso:                 ${warning}\n`);
   process.stdout.write('------------------------------------------------------------------------\n');
-  process.stdout.write('Cambiar el perfil: ./mcpctl.sh configure\n');
+  process.stdout.write('Cambiar sólo el perfil: ./mcpctl.sh permissions-set\n');
   process.stdout.write('Ver listas completas: ./mcpctl.sh permissions --tools\n');
   if (showTools) {
     process.stdout.write('\nHERRAMIENTAS VISIBLES\n');
