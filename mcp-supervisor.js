@@ -5,11 +5,11 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const { spawn } = require('child_process');
-const { parseDotEnv, redactText } = require('./runtime-diagnostics');
-const { humanEvent } = require('./human-log');
-const { createAccessPolicy, TOOL_REQUIREMENTS } = require('./access-policy');
+const { parseDotEnv, redactText } = require('./lib/runtime-diagnostics');
+const { humanEvent } = require('./lib/human-log');
+const { createAccessPolicy, TOOL_REQUIREMENTS } = require('./lib/access-policy');
 const PACKAGE_VERSION = require('./package.json').version;
-const { applyPrivateOwnership, ensurePrivateDirectory } = require('./private-owner');
+const { applyPrivateOwnership, ensurePrivateDirectory } = require('./lib/private-owner');
 
 const ROOT = __dirname;
 const fileEnv = parseDotEnv(path.join(ROOT, '.env'));

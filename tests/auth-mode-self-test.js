@@ -8,6 +8,8 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
+const ROOT = path.resolve(__dirname, '..');
+
 function freePort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -20,8 +22,8 @@ function freePort() {
 }
 
 function launch(env) {
-  return spawn(process.execPath, [path.join(__dirname, 'mcp-server.js'), '--http'], {
-    cwd: __dirname,
+  return spawn(process.execPath, [path.join(ROOT, 'mcp-server.js'), '--http'], {
+    cwd: ROOT,
     env: { ...process.env, ...env },
     stdio: ['ignore', 'ignore', 'pipe']
   });
@@ -61,6 +63,8 @@ async function main() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-auth-mode-'));
   const common = {
     HOST: '127.0.0.1',
+    MCP_CONFIG_SOURCE: 'env',
+    MCP_RUN_AS_ROOT: '0',
     ALLOWED_PATHS: temp,
     WORKING_DIR: temp,
     MCP_FULL_ACCESS: '0',

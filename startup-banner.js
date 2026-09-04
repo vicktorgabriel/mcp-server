@@ -4,9 +4,9 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { createAccessPolicy, TOOL_REQUIREMENTS } = require('./access-policy');
-const { parseDotEnv } = require('./runtime-diagnostics');
-const { applyPrivateOwnership, ensurePrivateDirectory } = require('./private-owner');
+const { createAccessPolicy, TOOL_REQUIREMENTS } = require('./lib/access-policy');
+const { parseDotEnv } = require('./lib/runtime-diagnostics');
+const { applyPrivateOwnership, ensurePrivateDirectory } = require('./lib/private-owner');
 
 const ROOT = __dirname;
 const PACKAGE = require('./package.json');

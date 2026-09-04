@@ -3,7 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { collectRuntimeStatus, parseDotEnv, redactText } = require('./runtime-diagnostics');
+const { collectRuntimeStatus, parseDotEnv, redactText } = require('./lib/runtime-diagnostics');
 
 const ROOT = __dirname;
 

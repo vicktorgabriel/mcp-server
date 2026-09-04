@@ -7,7 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { Readable } = require('stream');
-const { OAuthProvider, tokenHash } = require('./oauth-provider');
+const { OAuthProvider, tokenHash } = require('../lib/oauth-provider');
 
 const ASSERTION_TYPE = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
 
@@ -61,6 +61,7 @@ async function main() {
   const issuer = 'https://mcp.example.test';
   const resource = `${issuer}/mcp`;
   const tokenEndpoint = `${issuer}/oauth/token`;
+  const revocationEndpoint = `${issuer}/oauth/revoke`;
   const kid = 'chatgpt-test-key';
   const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
   const jwk = publicKey.export({ format: 'jwk' });
@@ -98,6 +99,7 @@ async function main() {
 
     const metadata = provider.metadata(issuer);
     assert.ok(metadata.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
+    assert.ok(metadata.revocation_endpoint_auth_methods_supported.includes('private_key_jwt'));
     const client = await provider.resolveClient(clientId, { redirectUri });
     assert.equal(client.tokenEndpointAuthMethod, 'private_key_jwt');
     assert.deepEqual(client.tokenEndpointAuthMethods, ['none', 'private_key_jwt']);
@@ -205,6 +207,34 @@ async function main() {
     const refreshed = JSON.parse(refreshRes.body);
     assert.match(refreshed.access_token, /^mcp_at_/);
     assert.notEqual(refreshed.refresh_token, tokens.refresh_token);
+
+    const wrongRevocationAudience = signAssertion(privateKey, { clientId, audience: tokenEndpoint, kid });
+    const wrongRevocationBody = new URLSearchParams({
+      client_id: clientId,
+      token: refreshed.refresh_token,
+      token_type_hint: 'refresh_token',
+      client_assertion_type: ASSERTION_TYPE,
+      client_assertion: wrongRevocationAudience
+    }).toString();
+    const wrongRevocationRes = fakeResponse();
+    await provider.handleRevoke(fakeRequest(wrongRevocationBody), wrongRevocationRes, issuer);
+    assert.equal(wrongRevocationRes.statusCode, 401,
+      'a client assertion for the token endpoint must not authenticate at revocation');
+
+    const revocationAssertion = signAssertion(privateKey, { clientId, audience: revocationEndpoint, kid });
+    const revocationBody = new URLSearchParams({
+      client_id: clientId,
+      token: refreshed.refresh_token,
+      token_type_hint: 'refresh_token',
+      client_assertion_type: ASSERTION_TYPE,
+      client_assertion: revocationAssertion
+    }).toString();
+    const revocationRes = fakeResponse();
+    await provider.handleRevoke(fakeRequest(revocationBody), revocationRes, issuer);
+    assert.equal(revocationRes.statusCode, 200, revocationRes.body);
+    provider.refreshStore();
+    assert.equal(provider.store.state.accessTokens[tokenHash(refreshed.access_token)], undefined);
+    assert.equal(provider.store.state.refreshTokens[tokenHash(refreshed.refresh_token)], undefined);
 
     const badResourceBody = new URLSearchParams({
       grant_type: 'authorization_code',

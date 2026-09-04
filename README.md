@@ -1,10 +1,10 @@
 # MCP Local Full Control
 
-> **4.5.2:** endurece el estado OAuth frente a solicitudes simultáneas y agrega trazas seguras de transacción. Después de cada operación asíncrona crítica se recarga el estado antes de guardar, evitando pisar sesiones concurrentes. Los logs muestran sólo una huella SHA-256 abreviada de la transacción, nunca el ID real, contraseña, state, code, verifier ni tokens.
+> **4.5.3:** corrige el retorno OAuth desde el formulario sandboxed de ChatGPT. La CSP permite ahora únicamente el issuer y el origen del callback registrado, evitando que `form-action` bloquee el redirect después del login. También separa completamente Autorizar/Cancelar, acepta `Origin: null` sólo con Fetch Metadata de navegación segura, serializa el estado OAuth entre procesos, mejora el diagnóstico sin registrar secretos y ordena módulos, pruebas y documentación en carpetas específicas.
 
 Servidor MCP para administrar un equipo propio desde ChatGPT y otros clientes compatibles. Expone herramientas de archivos, comandos, procesos, servicios, Git, tmux, escritorio, captura de pantalla, cámara, audio y diagnóstico del sistema.
 
-La versión 4.5.1 agrega:
+Incluye:
 
 - un panel de inicio con logo, versión, cantidad de herramientas, perfil, cuenta, confirmaciones y estado de actualización;
 - configuración inicial completa en **una sola terminal**;
@@ -66,6 +66,36 @@ La configuración se conserva para los próximos inicios.
 | `.runtime/` | estado, actividad y diagnóstico local | Ignorado |
 
 No copies secretos dentro del README, scripts, commits, capturas públicas ni mensajes de soporte.
+
+## Estructura del repositorio
+
+La raíz conserva solamente los entrypoints y comandos que usa una persona o el
+servicio. El código interno, las pruebas y los informes no se mezclan con esos
+comandos:
+
+```text
+mcp-server/
+├── mcp-server.js          # servidor MCP HTTP/stdio
+├── mcp-supervisor.js      # proceso supervisor y túnel
+├── mcpctl.sh              # administración cotidiana
+├── start-mcp.sh           # instalación y arranque
+├── lib/                   # OAuth, políticas, herramientas, logs y diagnóstico
+├── tests/                 # self-tests aislados; nunca usan el estado OAuth real
+├── docs/                  # informes técnicos sin secretos
+├── .private/              # credenciales/estado local, ignorado por Git
+└── .runtime/              # logs y estado de ejecución, ignorado por Git
+```
+
+Las comprobaciones principales siguen siendo:
+
+```bash
+npm test
+npm run selftest
+npm audit --audit-level=low
+```
+
+El informe de esta corrección está en
+[`docs/OAUTH_DIAGNOSTICO.md`](docs/OAUTH_DIAGNOSTICO.md).
 
 ## Perfiles de acceso
 
@@ -186,9 +216,21 @@ Escucha únicamente en `127.0.0.1`. Sirve para clientes instalados en la misma c
 
 ## Autenticación
 
-### Compatibilidad actual de ChatGPT (4.5.1)
+### Compatibilidad actual de ChatGPT (4.5.3)
 
-El modo recomendado sigue siendo **OAuth 2.1**; no es necesario cambiar a sin autenticación ni a un token Bearer. Por defecto se usa **DCR + authorization code + PKCE S256**. El servidor no anuncia `authorization_response_iss_parameter_supported` salvo que `MCP_OAUTH_RESPONSE_ISS=1`, porque RFC 9207 exige devolver `iss` en absolutamente todas las respuestas de autorización. Con el valor predeterminado `0`, ChatGPT registra un callback específico por conexión.
+El servidor debe continuar configurado con **OAuth 2.1**; no es necesario cambiarlo a sin autenticación ni a un token Bearer. En la pantalla de creación de ChatGPT elegí **Mixtas / Mixed authentication**, no la opción global **OAuth**. Esta selección no rebaja la seguridad: permite que ChatGPT ejecute `initialize` y `tools/list` sin sesión para descubrir el MCP, pero ninguna herramienta puede ejecutarse hasta completar OAuth.
+
+El flujo validado es:
+
+1. crear la app con autenticación **Mixtas** y escanear sus herramientas;
+2. seleccionar la app en un chat y pedir `tool_policy_status`;
+3. pulsar **Actualizar acceso / Update access** cuando ChatGPT lo solicite;
+4. ingresar las credenciales en la página del MCP y autorizar una sola vez;
+5. esperar el regreso automático a ChatGPT y la respuesta autenticada de la herramienta.
+
+La opción global **OAuth** también puede iniciar el protocolo estándar, pero la interfaz de ChatGPT ha mostrado intentos que quedan esperando antes de enviar siquiera `GET /oauth/authorize`. El flujo Mixtas por herramienta es el camino reproducible y comprobado para esta versión.
+
+Por defecto se usa **DCR + authorization code + PKCE S256**. El servidor no anuncia `authorization_response_iss_parameter_supported` salvo que `MCP_OAUTH_RESPONSE_ISS=1`, porque RFC 9207 exige devolver `iss` en absolutamente todas las respuestas de autorización. Con el valor predeterminado `0`, ChatGPT registra un callback específico por conexión.
 
 Las herramientas publican `securitySchemes: [{type: "oauth2", scopes: ["mcp:tools"]}]` y el mismo descriptor en `_meta` por compatibilidad. Antes de enlazar la cuenta, `initialize` y `tools/list` pueden responder para que ChatGPT descubra el servidor; ninguna herramienta se ejecuta sin token. Un `tools/call` no autenticado devuelve un resultado de error con `_meta["mcp/www_authenticate"]`, tal como requiere el flujo de linking de ChatGPT.
 
@@ -203,8 +245,8 @@ El servidor incluye un proveedor OAuth para la cuenta administradora local. Impl
 - PKCE con `S256`;
 - Protected Resource Metadata;
 - Authorization Server Metadata;
-- Client ID Metadata Documents (CIMD) para la identidad estable de ChatGPT;
-- registro dinámico de clientes (DCR) como fallback;
+- registro dinámico de clientes (DCR) como camino predeterminado y validado;
+- Client ID Metadata Documents (CIMD) opcional y con validación remota fail-closed;
 - tokens de acceso de corta duración;
 - refresh tokens rotativos y detección de reutilización, con revocación de toda la familia de sesión;
 - validación estricta del recurso `/mcp`;
@@ -213,13 +255,21 @@ El servidor incluye un proveedor OAuth para la cuenta administradora local. Impl
 - hashes scrypt para la contraseña;
 - almacenamiento de códigos y tokens únicamente como hashes.
 
-En el asistente elegí OAuth, definí un usuario y una contraseña distinta de la contraseña del sistema. Cuando ChatGPT escanee las herramientas, se abrirá la página de autorización del propio MCP. Esa pantalla muestra el destino, el perfil elegido, la cantidad de herramientas y alertas rojas si se habilitaron `root` o las confirmaciones desactivadas; revisalos antes de autorizar.
+En el asistente del servidor elegí OAuth y definí un usuario y una contraseña distinta de la contraseña del sistema. En ChatGPT elegí Mixtas: el escaneo descubre las herramientas y la página de autorización se abre al invocar una herramienta protegida y pulsar **Actualizar acceso**. Esa pantalla muestra el destino, el perfil elegido, la cantidad de herramientas y alertas rojas si se habilitaron `root` o las confirmaciones desactivadas; revisalos antes de autorizar.
 
 El proveedor integrado está orientado a una instalación privada y de un solo administrador. Para publicar un servicio multiusuario, empresarial o de terceros, conviene usar un proveedor de identidad establecido y auditar su configuración por separado.
 
-El modo predeterminado anuncia **DCR** y deja CIMD desactivado para máxima compatibilidad con ChatGPT. Para CIMD acepta por defecto únicamente `chatgpt.com`, valida que el `client_id` sea HTTPS, comprueba `redirect_uri`, PKCE y `resource`. El modo predeterminado del token endpoint es `none + PKCE`, que ChatGPT soporta oficialmente y no necesita `client_secret` ni JWKS. `private_key_jwt` queda implementado pero se habilita sólo con `MCP_OAUTH_PRIVATE_KEY_JWT=1`; entonces se verifican RS256, `iss`/`sub`, audiencia, vigencia, replay y el JWKS HTTPS del mismo origen.
+El modo predeterminado anuncia **DCR** y deja CIMD desactivado para máxima compatibilidad con ChatGPT. Para CIMD acepta por defecto únicamente `chatgpt.com`, exige descargar y validar el documento HTTPS y comprueba `redirect_uri`, PKCE y `resource`. El modo predeterminado del token endpoint es `none + PKCE`, que ChatGPT soporta oficialmente y no necesita `client_secret` ni JWKS. `private_key_jwt` queda implementado pero se habilita sólo con `MCP_OAUTH_PRIVATE_KEY_JWT=1`; entonces se verifican RS256, `iss`/`sub`, audiencia, vigencia, replay y el JWKS HTTPS del mismo origen.
 
-Si la descarga del CIMD oficial falla (por ejemplo, `HTTP 404` desde una red concreta), 4.4.1 reconoce exclusivamente los dos formatos que OpenAI documenta: el client ID estable `https://chatgpt.com/oauth/client.json` y el formato con `callback_id`. El fallback deriva únicamente el callback oficial `chatgpt.com`, no acepta hosts arbitrarios y mantiene obligatorios PKCE y `resource`. DCR continúa disponible como alternativa.
+Cuando el cliente registra el grant `refresh_token`, el servidor entrega un
+refresh token rotativo aunque la autorización solicite únicamente el scope de
+recurso `mcp:tools`. `offline_access` continúa anunciado como scope opcional,
+pero no se fuerza dentro de `WWW-Authenticate` ni de los metadatos del recurso.
+
+Si la descarga de un CIMD falla, el servidor no fabrica metadatos ni confía en
+un cliente que no pudo verificar. La solicitud se rechaza y DCR continúa
+disponible. Para el enlace reproducible de ChatGPT mantené la configuración
+predeterminada y elegí **Mixtas**.
 
 Comandos de administración:
 
@@ -276,8 +326,8 @@ El registro principal describe **qué se está haciendo**, quién lo solicitó, 
 Ejemplo conceptual:
 
 ```text
-02/09/2026 18:42:10   ACCION       Revisando el estado Git del proyecto. Solicitud de usuario OAuth admin mediante ChatGPT.
-02/09/2026 18:42:10   RESULTADO    Operación Git finalizada correctamente. Duración: 84 ms.
+2026-09-04T18:42:10.123-03:00 | ACCION     | Revisando el estado Git del proyecto. Solicitud de usuario OAuth mediante ChatGPT.
+2026-09-04T18:42:10.207-03:00 | RESULTADO  | Operación Git finalizada correctamente. Duración: 84 ms.
 ```
 
 Seguir la actividad en tiempo real:
@@ -312,12 +362,14 @@ La ruta oficial actual en ChatGPT Web es:
 4. Escribí un nombre que identifique al equipo, por ejemplo `MCP Taller`.
 5. Pegá la URL que muestra `./mcpctl.sh url`, siempre terminada en `/mcp`.
 6. Elegí el método configurado:
-   - **OAuth:** completá la pantalla de autorización del MCP.
+   - Si el servidor usa **OAuth:** elegí **Mixtas / Mixed authentication** en ChatGPT. No elijas la opción global OAuth para el primer enlace.
    - **Bearer:** ingresá el token privado si la interfaz ofrece ese método.
    - **Sin autenticación:** elegí `No authentication`.
 7. Pulsá **Escanear herramientas / Scan tools**, esperá que termine y revisá las acciones detectadas.
 8. Pulsá **Crear / Create**.
 9. En un chat nuevo, seleccioná la app desde el menú de herramientas, `+` → **Más** o mediante una mención con `@`, según la interfaz disponible.
+10. Pedí que ejecute `tool_policy_status`. ChatGPT mostrará **Necesita más acceso**; pulsá **Actualizar acceso**, completá el login del MCP y autorizá una sola vez.
+11. Esperá que ChatGPT vuelva al chat y muestre el resultado de `tool_policy_status`. No vuelvas a pulsar Conectar sobre el formulario ya enviado.
 
 En interfaces anteriores, el recorrido equivalente puede aparecer como **Configuración → Complementos → Configuración avanzada → Modo desarrollador**, seguido de **Complementos → Explorar complementos → Agregar**.
 
@@ -390,6 +442,20 @@ No todas las capacidades existen en todos los equipos. `control_capabilities` in
 
 Si el log llega a `Inicio de autorización` pero la interfaz de ChatGPT queda con el botón de inicio de sesión girando y no muestra la página del MCP, revisá la versión. En 4.5.0 y anteriores la página OAuth enviaba `X-Frame-Options: DENY` y `frame-ancestors 'none'`, lo que puede bloquear la interfaz nueva cuando presenta el login dentro de su propia superficie. Desde 4.5.1 se permite framing exclusivamente desde `chatgpt.com`/subdominios y se mantiene CSP restrictivo para los demás orígenes.
 
+### Acepta usuario y contraseña, pero ChatGPT no vuelve al chat
+
+En 4.5.2 y anteriores, la CSP de la pantalla permitía el POST sólo hacia el
+issuer. Chromium aplicaba `form-action` también al redirect posterior y podía
+bloquear el callback cross-origin de ChatGPT después de que el servidor ya
+hubiera emitido el código. El síntoma era una pantalla inmóvil, ausencia total
+de `POST /oauth/token` y, al pulsar Conectar otra vez, una transacción vencida o
+rechazada.
+
+Desde 4.5.3, `form-action` admite únicamente el issuer y el origen del callback
+registrado. El servidor continúa enviando el 302 al redirect URI exacto guardado
+en la transacción. Si vuelve a ocurrir, no reenvíes el formulario: consultá
+`./mcpctl.sh logs` y comprobá si aparece `Solicitud al token endpoint`.
+
 ### ngrok funciona manualmente pero el launcher falla
 
 Cerrá cualquier proceso ngrok manual y ejecutá:
@@ -412,7 +478,10 @@ Un 502 suele indicar que el túnel existe pero no puede llegar al servidor local
 
 ### CIMD devuelve HTTP 404 y no aparece el login
 
-Si el log contiene `No se pudo verificar el documento CIMD ... HTTP 404`, las versiones anteriores a 4.4.1 cortaban la autorización antes de mostrar la pantalla de usuario/contraseña. Desde 4.4.1, los client IDs oficiales de ChatGPT tienen un fallback restringido y el flujo continúa con `none + PKCE`; no hace falta borrar `.env` ni `.private`.
+Si el log contiene `No se pudo verificar el documento CIMD ... HTTP 404`, el
+servidor rechazó correctamente una identidad que no pudo comprobar. No borres
+`.env` ni `.private`: ejecutá `./mcpctl.sh configure`, mantené DCR predeterminado,
+reiniciá y creá una conexión nueva en ChatGPT con **Mixtas**.
 
 El modo firmado `private_key_jwt` puede activarse manualmente con `MCP_OAUTH_PRIVATE_KEY_JWT=1`, pero el valor predeterminado es `0` para evitar una segunda dependencia de red hacia el JWKS cuando el equipo ya tiene problemas para consultar `chatgpt.com`.
 
@@ -427,7 +496,12 @@ git pull --ff-only
 bash start-mcp.sh
 ```
 
-Las versiones 4.3.0+ aceptan CIMD de ChatGPT y conservan DCR como fallback. La 4.4.0 además completa el canje de token con `private_key_jwt`. Si el mensaje continúa y el `client_id` no es una URL CIMD sino un ID antiguo, ChatGPT probablemente está reutilizando un cliente DCR que ya no existe en `.private/oauth-state.json`. En ese caso eliminá la app/conector anterior de ChatGPT y crealo de nuevo para forzar una identidad nueva.
+La versión actual acepta CIMD sólo cuando su documento remoto puede validarse y
+conserva DCR como camino predeterminado. Si el mensaje continúa y el `client_id`
+no es una URL CIMD sino un ID antiguo, ChatGPT probablemente está reutilizando
+un cliente DCR que ya no existe en `.private/oauth-state.json`. En ese caso
+eliminá la app/conector anterior de ChatGPT y crealo de nuevo para forzar una
+identidad nueva.
 
 Podés ver el estado local con:
 
@@ -438,13 +512,14 @@ Podés ver el estado local con:
 
 ### Autoriza correctamente pero ChatGPT rechaza después
 
-Si el log muestra `El usuario ... autorizó a ChatGPT` pero `oauth-status` sigue con cero sesiones, revisá inmediatamente:
+Si el log muestra `Credenciales OAuth aceptadas y código emitido` pero
+`oauth-status` sigue con cero sesiones, revisá inmediatamente:
 
 ```bash
 ./mcpctl.sh logs
 ```
 
-Desde 4.4.0 el siguiente paso queda registrado de forma segura como `Solicitud al token endpoint`. El registro muestra el tipo de grant, si ChatGPT utilizó `none` o `private_key_jwt`, si el `resource` coincide y si PKCE llegó con una longitud válida. Nunca imprime `code`, `code_verifier`, `client_assertion`, access tokens ni refresh tokens. Un fallo posterior aparece como `Falló el token exchange` con el código OAuth exacto.
+El siguiente paso queda registrado de forma segura como `Solicitud al token endpoint`. El registro muestra el tipo de grant, si ChatGPT utilizó `none` o `private_key_jwt`, si el `resource` coincide y si PKCE llegó con una longitud válida. Nunca imprime `code`, `code_verifier`, `client_assertion`, access tokens ni refresh tokens. Un fallo posterior aparece como `Falló el token exchange` con el código OAuth exacto.
 
 ### OAuth no abre o vuelve a pedir autorización
 
@@ -457,7 +532,7 @@ Comprobá que:
 
 - la URL pública no cambió;
 - usa HTTPS;
-- ChatGPT está configurado con OAuth;
+- el servidor usa OAuth y ChatGPT fue creado con **Mixtas**;
 - el servicio y ngrok están activos;
 - no se revocaron las sesiones.
 
@@ -489,8 +564,3 @@ Las pruebas incluyen sintaxis, panel de inicio y caché de actualización, los c
 ## Licencia
 
 MIT.
-
-
-### Compatibilidad OAuth 4.4.2
-
-Por defecto `MCP_OAUTH_CIMD=0` y `MCP_OAUTH_DYNAMIC_REGISTRATION=1`. Esto obliga a ChatGPT a registrar un cliente DCR nuevo y evita el fetch CIMD/JWKS. CIMD puede reactivarse manualmente con `MCP_OAUTH_CIMD=1`. Después de cambiar entre CIMD y DCR, eliminá y recreá la app en ChatGPT para que no reutilice identidad anterior.

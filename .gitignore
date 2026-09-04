@@ -20,9 +20,6 @@ yarn-error.log*
 *.swo
 __pycache__/
 *.pyc
-
-__pycache__/
-*.pyc
 .mcp-process-*.log
 .runtime/
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal X11 desktop input helper for the MCP full-control tools.
+"""Internal X11 desktop input helper for the MCP full-control tools.
 
 Uses python-xlib/XTEST so the MCP does not depend on xdotool. It intentionally
 runs as the current desktop user and therefore cannot bypass OS permissions.

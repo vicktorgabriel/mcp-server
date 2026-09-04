@@ -69,7 +69,7 @@ case "$COMMAND" in
     node log-viewer.js --summary-only
     ;;
   url)
-    node runtime-diagnostics.js url
+    node lib/runtime-diagnostics.js url
     ;;
   chatgpt)
     node chatgpt-guide.js
@@ -191,7 +191,7 @@ case "$COMMAND" in
     exec node log-viewer.js --lines "${2:-80}" --follow
     ;;
   logs-raw)
-    node runtime-diagnostics.js logs-raw "${2:-120}"
+    node lib/runtime-diagnostics.js logs-raw "${2:-120}"
     ;;
   oauth-status)
     node oauth-admin.js status
@@ -203,7 +203,7 @@ case "$COMMAND" in
     node oauth-admin.js reset-all
     ;;
   doctor)
-    node runtime-diagnostics.js doctor
+    node lib/runtime-diagnostics.js doctor
     ;;
   uninstall)
     if service_exists; then

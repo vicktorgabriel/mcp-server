@@ -7,13 +7,14 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { configureOAuthAdmin } = require('./oauth-provider');
+const { configureOAuthAdmin } = require('../lib/oauth-provider');
 
-const CLI = path.join(__dirname, 'oauth-admin.js');
+const ROOT = path.resolve(__dirname, '..');
+const CLI = path.join(ROOT, 'oauth-admin.js');
 
 function run(args, storePath, extra = {}) {
   return spawnSync(process.execPath, [CLI, ...args], {
-    cwd: __dirname,
+    cwd: ROOT,
     encoding: 'utf8',
     env: { ...process.env, MCP_OAUTH_STORE: storePath, ...extra }
   });
@@ -46,7 +47,7 @@ function main() {
       '-o', 'pipefail', '-c',
       'MCP_OAUTH_STORE="$1" "$2" "$3" status | grep -q "Configurado: sí"',
       '_', storePath, process.execPath, CLI
-    ], { cwd: __dirname, encoding: 'utf8' });
+    ], { cwd: ROOT, encoding: 'utf8' });
     assert.equal(exactPipeline.status, 0, `${exactPipeline.stdout}${exactPipeline.stderr}`);
     assert.ok(!/EPIPE|Unhandled 'error' event/.test(`${exactPipeline.stdout}${exactPipeline.stderr}`));
 
@@ -54,7 +55,7 @@ function main() {
       '-o', 'pipefail', '-c',
       'MCP_OAUTH_STORE="$1" "$2" "$3" status | head -n 0',
       '_', storePath, process.execPath, CLI
-    ], { cwd: __dirname, encoding: 'utf8' });
+    ], { cwd: ROOT, encoding: 'utf8' });
     assert.equal(immediateClose.status, 0, `${immediateClose.stdout}${immediateClose.stderr}`);
     assert.ok(!/EPIPE|Unhandled 'error' event/.test(`${immediateClose.stdout}${immediateClose.stderr}`));
 

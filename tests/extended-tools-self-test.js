@@ -10,6 +10,8 @@ const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 
+const ROOT = path.resolve(__dirname, '..');
+
 function freePort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -79,8 +81,8 @@ async function main() {
   fs.writeFileSync(path.join(outside, 'outside.txt'), 'must stay outside\n');
   fs.symlinkSync(outside, path.join(root, 'escape-link'));
 
-  const child = spawn(process.execPath, [path.join(__dirname, 'mcp-server.js'), '--http'], {
-    cwd: __dirname,
+  const child = spawn(process.execPath, [path.join(ROOT, 'mcp-server.js'), '--http'], {
+    cwd: ROOT,
     env: {
       ...process.env,
       HOST: '127.0.0.1',
@@ -92,6 +94,8 @@ async function main() {
       MCP_TOOL_ALLOWLIST: '',
       MCP_TOOL_DENYLIST: '',
       MCP_FULL_ACCESS: '0',
+      MCP_CONFIG_SOURCE: 'env',
+      MCP_RUN_AS_ROOT: '0',
       ALLOWED_PATHS: root,
       WORKING_DIR: root,
       MCP_HUMAN_LOG: path.join(root, '.runtime', 'events.log'),
@@ -250,6 +254,8 @@ async function main() {
       MCP_AUTH_MODE: 'none',
       MCP_ACCESS_PROFILE: 'full',
       MCP_FULL_ACCESS: '0',
+      MCP_CONFIG_SOURCE: 'env',
+      MCP_RUN_AS_ROOT: '0',
       MCP_CRITICAL_CONFIRMATIONS: '0',
       ALLOWED_PATHS: root,
       WORKING_DIR: root,
@@ -260,8 +266,8 @@ async function main() {
       MCP_INPUT_ENABLED: '0'
     };
     const stdio = (request) => {
-      const result = spawnSync(process.execPath, [path.join(__dirname, 'mcp-server.js'), '--stdio'], {
-        cwd: __dirname,
+      const result = spawnSync(process.execPath, [path.join(ROOT, 'mcp-server.js'), '--stdio'], {
+        cwd: ROOT,
         input: `${JSON.stringify(request)}\n`,
         encoding: 'utf8',
         env: noConfirmEnv

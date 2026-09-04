@@ -192,8 +192,8 @@ if [ "$RUN_AS_ROOT" = '1' ] && [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/n
   exit 1
 fi
 node - <<'NODE'
-const { parseDotEnv } = require('./runtime-diagnostics');
-const { createAccessPolicy } = require('./access-policy');
+const { parseDotEnv } = require('./lib/runtime-diagnostics');
+const { createAccessPolicy } = require('./lib/access-policy');
 const fileEnv = parseDotEnv();
 const filePriority = String(process.env.MCP_CONFIG_SOURCE || '').toLowerCase() === 'file';
 createAccessPolicy(filePriority ? { ...process.env, ...fileEnv } : { ...fileEnv, ...process.env });

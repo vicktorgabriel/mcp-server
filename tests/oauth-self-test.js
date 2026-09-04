@@ -4,11 +4,14 @@
 const assert = require('assert');
 const crypto = require('crypto');
 const fs = require('fs');
+const http = require('http');
 const net = require('net');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
-const { configureOAuthAdmin, OAuthStateStore, tokenHash } = require('./oauth-provider');
+const { configureOAuthAdmin, OAuthStateStore, tokenHash } = require('../lib/oauth-provider');
+
+const ROOT = path.resolve(__dirname, '..');
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -44,6 +47,30 @@ function form(values) {
   return new URLSearchParams(values).toString();
 }
 
+function rawFormPost(url, body, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const request = http.request({
+      method: 'POST',
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      headers: {
+        ...headers,
+        'content-length': Buffer.byteLength(body)
+      }
+    }, (response) => {
+      response.resume();
+      response.once('end', () => resolve({
+        status: response.statusCode,
+        headers: { get: (name) => response.headers[String(name).toLowerCase()] || null }
+      }));
+    });
+    request.once('error', reject);
+    request.end(body);
+  });
+}
+
 async function json(response) {
   const text = await response.text();
   try { return JSON.parse(text); }
@@ -67,8 +94,8 @@ async function main() {
   const password = 'Prueba-OAuth-2026-Muy-Segura';
   configureOAuthAdmin(storePath, 'tester', password);
 
-  const child = spawn(process.execPath, [path.join(__dirname, 'mcp-server.js'), '--http'], {
-    cwd: __dirname,
+  const child = spawn(process.execPath, [path.join(ROOT, 'mcp-server.js'), '--http'], {
+    cwd: ROOT,
     env: {
       ...process.env,
       PORT: String(port),
@@ -79,6 +106,7 @@ async function main() {
       MCP_AUTH_MODE: 'oauth',
       MCP_AUTH_TOKEN: '',
       MCP_ACCESS_PROFILE: 'developer',
+      MCP_CONFIG_SOURCE: 'env',
       MCP_RUN_AS_ROOT: '1',
       MCP_TEST_ALLOW_ROOT_FLAG: '1',
       MCP_CRITICAL_CONFIRMATIONS: '0',
@@ -109,10 +137,17 @@ async function main() {
     const denied = await fetch(`${base}/mcp`);
     assert.equal(denied.status, 401);
     assert.match(denied.headers.get('www-authenticate') || '', /resource_metadata=/);
+    assert.match(denied.headers.get('www-authenticate') || '', /scope="mcp:tools"/);
+    assert.doesNotMatch(denied.headers.get('www-authenticate') || '', /error=/,
+      'a missing HTTP credential challenge must not claim an invalid token was supplied');
 
     const resourceMetadata = await json(await fetch(`${base}/.well-known/oauth-protected-resource/mcp`));
+    const rootResourceMetadata = await json(await fetch(`${base}/.well-known/oauth-protected-resource`));
     assert.equal(resourceMetadata.resource, `${base}/mcp`);
     assert.deepEqual(resourceMetadata.authorization_servers, [base]);
+    assert.deepEqual(resourceMetadata.scopes_supported, ['mcp:tools'],
+      'offline_access belongs to authorization-server metadata, not protected-resource requirements');
+    assert.deepEqual(rootResourceMetadata, resourceMetadata);
 
     const discoveryInitialize = await fetch(`${base}/mcp`, {
       method: 'POST',
@@ -146,17 +181,24 @@ async function main() {
     assert.equal(discoveryCallBody.result.isError, true);
     assert.ok(Array.isArray(discoveryCallBody.result._meta['mcp/www_authenticate']));
     assert.match(discoveryCallBody.result._meta['mcp/www_authenticate'][0], /resource_metadata=/);
+    assert.match(discoveryCallBody.result._meta['mcp/www_authenticate'][0], /error="invalid_token"/);
     assert.match(discoveryCallBody.result._meta['mcp/www_authenticate'][0], /error_description=/);
 
     const authorizationMetadata = await json(await fetch(`${base}/.well-known/oauth-authorization-server`));
     assert.equal(authorizationMetadata.issuer, base);
-    assert.ok(authorizationMetadata.scopes_supported.includes('offline_access'));
-    assert.ok(authorizationMetadata.code_challenge_methods_supported.includes('S256'));
+    assert.equal(authorizationMetadata.authorization_endpoint, `${base}/oauth/authorize`);
+    assert.equal(authorizationMetadata.token_endpoint, `${base}/oauth/token`);
+    assert.equal(authorizationMetadata.revocation_endpoint, `${base}/oauth/revoke`);
+    assert.deepEqual(authorizationMetadata.scopes_supported, ['mcp:tools', 'offline_access']);
+    assert.deepEqual(authorizationMetadata.response_types_supported, ['code']);
+    assert.deepEqual(authorizationMetadata.grant_types_supported, ['authorization_code', 'refresh_token']);
+    assert.deepEqual(authorizationMetadata.code_challenge_methods_supported, ['S256']);
     assert.equal(authorizationMetadata.authorization_response_iss_parameter_supported, undefined);
     assert.equal(authorizationMetadata.resource_indicators_supported, true);
     assert.ok(authorizationMetadata.response_modes_supported.includes('query'));
     assert.equal(authorizationMetadata.client_id_metadata_document_supported, false);
     assert.ok(authorizationMetadata.token_endpoint_auth_methods_supported.includes('none'));
+    assert.ok(authorizationMetadata.revocation_endpoint_auth_methods_supported.includes('none'));
     assert.equal(authorizationMetadata.registration_endpoint, `${base}/oauth/register`);
 
     const redirectUri = 'http://127.0.0.1:45891/callback';
@@ -187,11 +229,18 @@ async function main() {
     authUrl.searchParams.set('response_type', 'code');
     authUrl.searchParams.set('client_id', client.client_id);
     authUrl.searchParams.set('redirect_uri', redirectUri);
-    authUrl.searchParams.set('scope', 'mcp:tools offline_access');
+    authUrl.searchParams.set('scope', 'mcp:tools');
     authUrl.searchParams.set('state', 'estado-prueba');
     authUrl.searchParams.set('code_challenge', challenge);
     authUrl.searchParams.set('code_challenge_method', 'S256');
     authUrl.searchParams.set('resource', `${base}/mcp`);
+
+    const missingAuthorizationResource = new URL(authUrl);
+    missingAuthorizationResource.searchParams.delete('resource');
+    assert.equal((await fetch(missingAuthorizationResource)).status, 400);
+    const invalidAuthorizationPkce = new URL(authUrl);
+    invalidAuthorizationPkce.searchParams.set('code_challenge_method', 'plain');
+    assert.equal((await fetch(invalidAuthorizationPkce)).status, 400);
 
     const authorizePage = await fetch(authUrl, {
       headers: {
@@ -205,6 +254,8 @@ async function main() {
     assert.equal(authorizePage.headers.get('cross-origin-resource-policy'), 'cross-origin');
     assert.match(authorizePage.headers.get('content-security-policy') || '', /frame-ancestors[^;]*https:\/\/chatgpt\.com/);
     assert.match(authorizePage.headers.get('content-security-policy') || '', /https:\/\/\*\.chatgpt\.com/);
+    assert.match(authorizePage.headers.get('content-security-policy') || '', /form-action[^;]*http:\/\/127\.0\.0\.1:\d+/,
+      'form-action must allow the exact registered callback origin so Chromium can follow the form redirect');
     const page = await authorizePage.text();
     const transaction = page.match(/name="transaction" value="([^"]+)"/);
     assert.ok(transaction && transaction[1]);
@@ -217,16 +268,19 @@ async function main() {
     assert.ok(page.includes('se ejecuta como root'), 'the consent page must disclose root execution');
     assert.ok(page.includes('confirmaciones adicionales'), 'the consent page must disclose disabled confirmations');
 
-    const authorization = await fetch(`${base}/oauth/authorize`, {
-      method: 'POST',
-      redirect: 'manual',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: form({
-        transaction: transaction[1],
-        username: 'tester',
-        password,
-        decision: 'allow'
-      })
+    const authorizationBody = form({
+      transaction: transaction[1],
+      username: 'tester',
+      password,
+      decision: 'allow'
+    });
+    const authorization = await rawFormPost(`${base}/oauth/authorize`, authorizationBody, {
+        'content-type': 'application/x-www-form-urlencoded',
+        origin: 'null',
+        'sec-fetch-site': 'same-origin',
+        'sec-fetch-mode': 'navigate',
+        'sec-fetch-dest': 'document',
+        'sec-fetch-user': '?1'
     });
     assert.equal(authorization.status, 302);
     const callback = new URL(authorization.headers.get('location'));
@@ -248,6 +302,41 @@ async function main() {
     });
     assert.equal(tokenWithoutResource.status, 400);
 
+    const tokenWithWrongResource = await fetch(`${base}/oauth/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: form({
+        grant_type: 'authorization_code', client_id: client.client_id, code,
+        code_verifier: verifier, redirect_uri: redirectUri, resource: `${base}/different-resource`
+      })
+    });
+    assert.equal(tokenWithWrongResource.status, 400);
+    assert.equal((await json(tokenWithWrongResource)).error, 'invalid_target');
+
+    const tokenWithWrongVerifier = await fetch(`${base}/oauth/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: form({
+        grant_type: 'authorization_code', client_id: client.client_id, code,
+        code_verifier: `${verifier.slice(0, -1)}${verifier.endsWith('A') ? 'B' : 'A'}`,
+        redirect_uri: redirectUri, resource: `${base}/mcp`
+      })
+    });
+    assert.equal(tokenWithWrongVerifier.status, 400);
+    assert.equal((await json(tokenWithWrongVerifier)).error, 'invalid_grant');
+
+    const duplicateGrantBody = `${form({
+      grant_type: 'authorization_code', client_id: client.client_id, code,
+      code_verifier: verifier, redirect_uri: redirectUri, resource: `${base}/mcp`
+    })}&grant_type=refresh_token`;
+    const tokenWithDuplicateGrant = await fetch(`${base}/oauth/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: duplicateGrantBody
+    });
+    assert.equal(tokenWithDuplicateGrant.status, 400);
+    assert.equal((await json(tokenWithDuplicateGrant)).error, 'invalid_request');
+
     const tokenResponse = await fetch(`${base}/oauth/token`, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -264,7 +353,22 @@ async function main() {
     const tokens = await json(tokenResponse);
     assert.match(tokens.access_token, /^mcp_at_/);
     assert.match(tokens.refresh_token, /^mcp_rt_/);
+    assert.equal(tokens.scope, 'mcp:tools');
     assert.equal(tokens.resource, `${base}/mcp`);
+
+    const replayedCode = await fetch(`${base}/oauth/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: form({
+        grant_type: 'authorization_code',
+        client_id: client.client_id,
+        code,
+        code_verifier: verifier,
+        redirect_uri: redirectUri,
+        resource: `${base}/mcp`
+      })
+    });
+    assert.equal(replayedCode.status, 400, 'an authorization code must be consumable only once');
 
     const initialized = await fetch(`${base}/mcp`, {
       method: 'POST',
@@ -288,6 +392,29 @@ async function main() {
     const tools = await json(toolsResponse);
     assert.ok(tools.result.tools.some((tool) => tool.name === 'mcp_runtime_logs'));
 
+    const policyResponse = await fetch(`${base}/mcp`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${tokens.access_token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 21, method: 'tools/call', params: { name: 'tool_policy_status', arguments: {} } })
+    });
+    assert.equal(policyResponse.status, 200);
+    const policy = await json(policyResponse);
+    assert.notEqual(policy.result.isError, true, 'the authenticated tool must execute instead of returning an auth challenge');
+    assert.ok(Array.isArray(policy.result.content));
+
+    const revokeAccess = await fetch(`${base}/oauth/revoke`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: form({ client_id: client.client_id, token: tokens.access_token, token_type_hint: 'access_token' })
+    });
+    assert.equal(revokeAccess.status, 200);
+    const revokedAccess = await fetch(`${base}/mcp`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${tokens.access_token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 22, method: 'tools/list', params: {} })
+    });
+    assert.equal(revokedAccess.status, 401, 'a revoked access token must stop working immediately');
+
     const refreshWithoutResource = await fetch(`${base}/oauth/token`, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -306,12 +433,26 @@ async function main() {
         grant_type: 'refresh_token',
         client_id: client.client_id,
         refresh_token: tokens.refresh_token,
-        resource: `${base}/mcp`
+        resource: `${base}/mcp`,
+        scope: 'mcp:tools'
       })
     });
     assert.equal(refreshedResponse.status, 200);
     const refreshed = await json(refreshedResponse);
     assert.notEqual(refreshed.refresh_token, tokens.refresh_token, 'refresh tokens must rotate');
+    assert.equal(refreshed.scope, 'mcp:tools');
+    assert.match(refreshed.refresh_token, /^mcp_rt_/,
+      'narrowing the access scope must still return the rotated refresh token');
+
+    const refreshedPolicyResponse = await fetch(`${base}/mcp`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${refreshed.access_token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 23, method: 'tools/call', params: { name: 'tool_policy_status', arguments: {} } })
+    });
+    assert.equal(refreshedPolicyResponse.status, 200);
+    const refreshedPolicy = await json(refreshedPolicyResponse);
+    assert.notEqual(refreshedPolicy.result.isError, true,
+      'the real tool must keep working with the access token issued by refresh');
 
     const reusedRefresh = await fetch(`${base}/oauth/token`, {
       method: 'POST',
@@ -372,7 +513,7 @@ async function main() {
     assert.equal(revokedExternally.status, 401, 'externally revoked sessions must be reloaded without restarting the server');
 
     const stateText = fs.readFileSync(storePath, 'utf8');
-    for (const secret of [password, tokens.access_token, tokens.refresh_token, code, refreshed.access_token, refreshed.refresh_token, externalAccessToken]) {
+    for (const secret of [password, transaction[1], tokens.access_token, tokens.refresh_token, code, verifier, 'estado-prueba', refreshed.access_token, refreshed.refresh_token, externalAccessToken]) {
       assert.ok(!stateText.includes(secret), 'OAuth state must not contain clear credentials or tokens');
     }
     const mode = fs.statSync(storePath).mode & 0o777;
@@ -380,9 +521,20 @@ async function main() {
 
     const logs = fs.readFileSync(humanLog, 'utf8');
     assert.match(logs, /CONEXION/);
+    assert.match(logs, /descubrimiento sin sesión OAuth/,
+      'an unauthenticated initialize must not be reported as a completed OAuth connection');
+    assert.match(logs, /Credenciales OAuth aceptadas y código emitido/);
     assert.ok(!logs.includes(password));
     assert.ok(!logs.includes(tokens.access_token));
     assert.ok(!logs.includes(tokens.refresh_token));
+    assert.ok(!logs.includes(code));
+    assert.ok(!logs.includes(verifier));
+    assert.ok(!logs.includes('estado-prueba'));
+    assert.ok(!logs.includes(transaction[1]));
+    assert.match(logs, /origin=opaco/);
+    assert.match(logs, /entrada=POST \/oauth\/token/);
+    assert.match(logs, /salida=200 \/oauth\/token/);
+    assert.match(logs, /Token OAuth emitido correctamente/);
 
     process.stdout.write('oauth_end_to_end=OK\n');
   } finally {

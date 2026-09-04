@@ -5,7 +5,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { OAuthProvider, OAuthStateStore } = require('./oauth-provider');
+const { OAuthProvider, OAuthStateStore } = require('../lib/oauth-provider');
 
 async function main() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-oauth-cimd-'));
@@ -157,40 +157,36 @@ async function main() {
     assert.deepEqual(privateOnly.tokenEndpointAuthMethods, ['private_key_jwt']);
     assert.equal(privateOnly.tokenEndpointAuthMethod, 'private_key_jwt');
 
-    const fallbackStableProvider = new OAuthProvider({
-      storePath: path.join(temp, 'fallback-stable.json'),
+    const unavailableStableStore = path.join(temp, 'unavailable-stable.json');
+    const unavailableStableProvider = new OAuthProvider({
+      storePath: unavailableStableStore,
       cimdEnabled: true,
       cimdHosts: new Set(['chatgpt.com']),
       cimdFetcher: async () => { throw new Error('HTTP 404'); }
     });
-    const fallbackStable = await fallbackStableProvider.resolveClient(clientId, { redirectUri });
-    assert.equal(fallbackStable.cimdMetadataSource, 'official-chatgpt-fallback');
-    assert.equal(fallbackStable.tokenEndpointAuthMethod, 'none');
-    assert.deepEqual(fallbackStable.redirectUris, [redirectUri]);
-    const fallbackAuthUrl = new URL('https://mcp.example.test/oauth/authorize');
-    fallbackAuthUrl.searchParams.set('client_id', clientId);
-    fallbackAuthUrl.searchParams.set('redirect_uri', redirectUri);
-    fallbackAuthUrl.searchParams.set('response_type', 'code');
-    fallbackAuthUrl.searchParams.set('scope', 'mcp:tools offline_access');
-    fallbackAuthUrl.searchParams.set('code_challenge', 'B'.repeat(43));
-    fallbackAuthUrl.searchParams.set('code_challenge_method', 'S256');
-    fallbackAuthUrl.searchParams.set('resource', 'https://mcp.example.test/mcp');
-    const fallbackValidated = await fallbackStableProvider.validateAuthorizationRequest(fallbackAuthUrl, 'https://mcp.example.test');
-    assert.equal(fallbackValidated.clientId, clientId);
+    await assert.rejects(
+      () => unavailableStableProvider.resolveClient(clientId, { redirectUri }),
+      /No se pudo verificar la identidad OAuth/i
+    );
+    assert.equal(new OAuthStateStore(unavailableStableStore).state.clients[clientId], undefined,
+      'a failed CIMD fetch must not create a trusted client');
 
     const callbackId = 'callback_ABC123xyz';
     const callbackClientId = `https://chatgpt.com/oauth/${callbackId}/client.json`;
     const callbackRedirect = `https://chatgpt.com/connector/oauth/${callbackId}`;
-    const fallbackCallbackProvider = new OAuthProvider({
-      storePath: path.join(temp, 'fallback-callback.json'),
+    const unavailableCallbackStore = path.join(temp, 'unavailable-callback.json');
+    const unavailableCallbackProvider = new OAuthProvider({
+      storePath: unavailableCallbackStore,
       cimdEnabled: true,
       cimdHosts: new Set(['chatgpt.com']),
       cimdFetcher: async () => { throw new Error('HTTP 404'); }
     });
-    const fallbackCallback = await fallbackCallbackProvider.resolveClient(callbackClientId, { redirectUri: callbackRedirect });
-    assert.equal(fallbackCallback.cimdMetadataSource, 'official-chatgpt-fallback');
-    assert.deepEqual(fallbackCallback.redirectUris, [callbackRedirect]);
-    assert.deepEqual(fallbackCallback.tokenEndpointAuthMethods, ['none']);
+    await assert.rejects(
+      () => unavailableCallbackProvider.resolveClient(callbackClientId, { redirectUri: callbackRedirect }),
+      /No se pudo verificar la identidad OAuth/i
+    );
+    assert.equal(new OAuthStateStore(unavailableCallbackStore).state.clients[callbackClientId], undefined,
+      'a failed per-callback CIMD fetch must fail closed');
 
     process.stdout.write('oauth_cimd=OK\n');
   } finally {

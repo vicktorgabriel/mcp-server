@@ -6,11 +6,13 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const pkg = require('./package.json');
+const pkg = require('../package.json');
+
+const ROOT = path.resolve(__dirname, '..');
 
 function run(args, env = {}) {
-  return spawnSync(process.execPath, [path.join(__dirname, 'startup-banner.js'), ...args], {
-    cwd: __dirname,
+  return spawnSync(process.execPath, [path.join(ROOT, 'startup-banner.js'), ...args], {
+    cwd: ROOT,
     encoding: 'utf8',
     env: { ...process.env, ...env }
   });

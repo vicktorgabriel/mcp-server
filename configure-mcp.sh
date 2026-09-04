@@ -542,13 +542,13 @@ configure_tool_access() {
       echo
       echo 'Grupos disponibles:'
       node - <<'NODE'
-const { GROUPS } = require('./access-policy');
+const { GROUPS } = require('./lib/access-policy');
 for (const [name, description] of Object.entries(GROUPS)) console.log(`  ${name.padEnd(19)} ${description}`);
 NODE
       echo 'Nota: git_write, tmux_write y containers necesitan command_execution para las acciones que ejecutan procesos.'
       groups="$(prompt_text MCP_SETUP_ACCESS_GROUPS 'Grupos habilitados, separados por coma' 'diagnostics,files_read,system_read')"
       node - "$groups" <<'NODE'
-const { GROUPS, parseCsv } = require('./access-policy');
+const { GROUPS, parseCsv } = require('./lib/access-policy');
 const unknown=parseCsv(process.argv[2]).filter((name)=>!Object.hasOwn(GROUPS,name));
 if(unknown.length){console.error(`Grupos desconocidos: ${unknown.join(', ')}`);process.exit(1)}
 if(!parseCsv(process.argv[2]).length){console.error('Elegí al menos un grupo.');process.exit(1)}
@@ -745,7 +745,7 @@ main() {
   echo "Cuenta de ejecución: $PRIVILEGE_RESULT"
   echo "Confirmaciones críticas: $CONFIRMATION_RESULT"
   case "$AUTH_RESULT" in
-    oauth) echo 'Autenticación: OAuth 2.1. ChatGPT mostrará la pantalla de autorización.' ;;
+    oauth) echo 'Autenticación: OAuth 2.1. En ChatGPT elegí Mixtas; la primera herramienta protegida mostrará Actualizar acceso.' ;;
     bearer) echo "Autenticación: Bearer. Token privado: $PRIVATE_DIR/bearer-token.txt" ;;
     none) echo 'Autenticación: ninguna. Usar sólo con plena conciencia del riesgo.' ;;
   esac

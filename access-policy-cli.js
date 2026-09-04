@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 
-const { createAccessPolicy, TOOL_REQUIREMENTS } = require('./access-policy');
-const { parseDotEnv } = require('./runtime-diagnostics');
+const { createAccessPolicy, TOOL_REQUIREMENTS } = require('./lib/access-policy');
+const { parseDotEnv } = require('./lib/runtime-diagnostics');
 
 function main() {
   const fileEnv = parseDotEnv();

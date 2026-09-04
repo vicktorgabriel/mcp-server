@@ -6,14 +6,16 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { GROUPS, TOOL_REQUIREMENTS, createAccessPolicy } = require('./access-policy');
+const { GROUPS, TOOL_REQUIREMENTS, createAccessPolicy } = require('../lib/access-policy');
+
+const ROOT = path.resolve(__dirname, '..');
 
 function namesFor(profile, extra = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-policy-list-'));
   try {
     const request = { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} };
-    const result = spawnSync(process.execPath, [path.join(__dirname, 'mcp-server.js'), '--stdio'], {
-      cwd: __dirname,
+    const result = spawnSync(process.execPath, [path.join(ROOT, 'mcp-server.js'), '--stdio'], {
+      cwd: ROOT,
       input: `${JSON.stringify(request)}\n`,
       encoding: 'utf8',
       env: {
@@ -25,6 +27,8 @@ function namesFor(profile, extra = {}) {
         MCP_EXPOSURE_MODE: 'local',
         MCP_AUTH_MODE: 'none',
         MCP_FULL_ACCESS: '0',
+        MCP_CONFIG_SOURCE: 'env',
+        MCP_RUN_AS_ROOT: '0',
         ALLOWED_PATHS: temp,
         WORKING_DIR: temp,
         MCP_HUMAN_LOG: path.join(temp, 'events.log'),
@@ -47,8 +51,8 @@ function callBlocked(profile, toolName) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-policy-call-'));
   try {
     const request = { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: toolName, arguments: {} } };
-    const result = spawnSync(process.execPath, [path.join(__dirname, 'mcp-server.js'), '--stdio'], {
-      cwd: __dirname,
+    const result = spawnSync(process.execPath, [path.join(ROOT, 'mcp-server.js'), '--stdio'], {
+      cwd: ROOT,
       input: `${JSON.stringify(request)}\n`,
       encoding: 'utf8',
       env: {
@@ -57,6 +61,8 @@ function callBlocked(profile, toolName) {
         MCP_EXPOSURE_MODE: 'local',
         MCP_AUTH_MODE: 'none',
         MCP_FULL_ACCESS: '0',
+        MCP_CONFIG_SOURCE: 'env',
+        MCP_RUN_AS_ROOT: '0',
         ALLOWED_PATHS: temp,
         WORKING_DIR: temp,
         MCP_HUMAN_LOG: path.join(temp, 'events.log'),
@@ -172,13 +178,14 @@ function main() {
   if (typeof process.getuid === 'function' && process.getuid() !== 0) {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-root-flag-'));
     try {
-      const result = spawnSync(process.execPath, [path.join(__dirname, 'mcp-server.js'), '--stdio'], {
-        cwd: __dirname,
+      const result = spawnSync(process.execPath, [path.join(ROOT, 'mcp-server.js'), '--stdio'], {
+        cwd: ROOT,
         input: `${JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/list', params: {} })}\n`,
         encoding: 'utf8',
         env: {
           ...process.env,
           MCP_ACCESS_PROFILE: 'full',
+          MCP_CONFIG_SOURCE: 'env',
           MCP_RUN_AS_ROOT: '1',
           MCP_EXPOSURE_MODE: 'local',
           MCP_AUTH_MODE: 'none',

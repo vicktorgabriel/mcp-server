@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 TEST_ROOT="$(mktemp -d /tmp/mcp-first-run-test.XXXXXX)"
 cleanup() { rm -rf "$TEST_ROOT"; }
 trap cleanup EXIT
@@ -152,7 +152,8 @@ grep -q 'Configuración → Apps → Configuración avanzada' <<<"$GUIDE_OUTPUT"
 grep -q 'Complementos → Explorar complementos → Agregar' <<<"$GUIDE_OUTPUT"
 grep -q 'Escanear herramientas / Scan tools' <<<"$GUIDE_OUTPUT"
 grep -q 'https://example-device.ngrok.dev/mcp' <<<"$GUIDE_OUTPUT"
-grep -q 'Autenticación: elegí OAuth' <<<"$GUIDE_OUTPUT"
+grep -q 'En ChatGPT elegí Mixtas / Mixed authentication' <<<"$GUIDE_OUTPUT"
+grep -q 'Actualizar acceso / Update access' <<<"$GUIDE_OUTPUT"
 ! grep -Fq "$TOKEN" <<<"$GUIDE_OUTPUT"
 ! grep -Fq "$PASSWORD" <<<"$GUIDE_OUTPUT"
 echo 'chatgpt_guide=OK'

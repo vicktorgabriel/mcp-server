@@ -274,7 +274,7 @@ URL=""
 if [ "$MODE" != "local" ]; then
   info "Esperando URL publica..."
   for _ in $(seq 1 30); do
-    URL="$(node runtime-diagnostics.js url 2>/dev/null || true)"
+    URL="$(node lib/runtime-diagnostics.js url 2>/dev/null || true)"
     [ -z "$URL" ] || break
     sleep 1
   done

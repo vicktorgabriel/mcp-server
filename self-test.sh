@@ -37,38 +37,44 @@ CONTROL_HELP="$(./mcpctl.sh --help)"
 for option in --temporary --persistent --configure --permissions --permissions-set --update-check --chatgpt; do grep -q -- "$option" <<<"$LAUNCHER_HELP"; done
 for command in configure permissions permissions-set update-check chatgpt logs-follow logs-raw oauth-status oauth-reset; do grep -q "$command" <<<"$CONTROL_HELP"; done
 grep -q 'MCP_LAUNCH_MODE=persistent' install-service.sh
-PERMISSIONS_OUTPUT="$(MCP_ACCESS_PROFILE=read_only MCP_FULL_ACCESS=0 ./mcpctl.sh permissions --tools)"
+PERMISSIONS_OUTPUT="$(MCP_CONFIG_SOURCE=env MCP_ACCESS_PROFILE=read_only MCP_FULL_ACCESS=0 MCP_RUN_AS_ROOT=0 node access-policy-cli.js --tools)"
 grep -q 'Sólo lectura y observación' <<<"$PERMISSIONS_OUTPUT"
 grep -q '+ read_file' <<<"$PERMISSIONS_OUTPUT"
 grep -q -- '- run_command' <<<"$PERMISSIONS_OUTPUT"
 echo 'launcher_and_control=OK'
 
 printf '\n== First-run wizard ==\n'
-./setup-self-test.sh
+./tests/setup-self-test.sh
 
 printf '\n== Startup dashboard and update notice ==\n'
-node startup-banner-self-test.js
+node tests/startup-banner-self-test.js
 
 printf '\n== Access profiles ==\n'
-node access-policy-self-test.js
+node tests/access-policy-self-test.js
 
 printf '\n== Extended tools ==\n'
-node extended-tools-self-test.js
+node tests/extended-tools-self-test.js
 
 printf '\n== Authentication modes ==\n'
-node auth-mode-self-test.js
+node tests/auth-mode-self-test.js
 
 printf '\n== OAuth administration CLI ==\n'
-node oauth-admin-self-test.js
+node tests/oauth-admin-self-test.js
+
+printf '\n== OAuth transaction safety ==\n'
+node tests/oauth-transaction-self-test.js
+
+printf '\n== OAuth state concurrency ==\n'
+node tests/oauth-state-concurrency-self-test.js
 
 printf '\n== OAuth Client ID Metadata Documents ==\n'
-node oauth-cimd-self-test.js
+node tests/oauth-cimd-self-test.js
 
 printf '\n== OAuth private_key_jwt token authentication ==\n'
-node oauth-private-key-jwt-self-test.js
+node tests/oauth-private-key-jwt-self-test.js
 
 printf '\n== OAuth end-to-end ==\n'
-node oauth-self-test.js
+node tests/oauth-self-test.js
 
 printf '\n== OAuth through the supervisor ==\n'
 (
@@ -102,7 +108,7 @@ printf '\n== OAuth through the supervisor ==\n'
   STATUS_JSON="$(PORT="$TEST_PORT" HOST=127.0.0.1 MCP_EXPOSURE_MODE=direct \
     PUBLIC_BASE_URL="$TEST_BASE" MCP_PUBLIC_BASE_URL="$TEST_BASE" MCP_AUTH_MODE=oauth \
     MCP_OAUTH_STORE="$TEST_STORE" MCP_RUNTIME_DIR="$TEST_DIR/runtime" \
-    MCP_HUMAN_LOG="$TEST_DIR/runtime/events.log" node runtime-diagnostics.js status)"
+    MCP_HUMAN_LOG="$TEST_DIR/runtime/events.log" node lib/runtime-diagnostics.js status)"
   printf '%s' "$STATUS_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const x=JSON.parse(s);if(!x.ok||!x.launch.temporary||x.config.authMode!=="oauth"||!x.config.authConfigured)process.exit(1);});'
   grep -q 'autenticación oauth' "$TEST_DIR/runtime/events.log"
   echo 'oauth_supervisor=OK'
@@ -113,7 +119,7 @@ node - "$SELFTEST_TMP/human.log" <<'NODE'
 const fs=require('fs');
 const [file]=process.argv.slice(2);
 process.env.MCP_HUMAN_LOG=file;
-const {humanEvent,safeCommand}=require('./human-log');
+const {humanEvent,safeCommand}=require('./lib/human-log');
 process.env.MCP_HUMAN_LOG_MAX_BYTES='65536';
 humanEvent('ACCION','Ejecutando tarea con token=SECRETO_DE_PRUEBA y password=CLAVE_DE_PRUEBA',{console:false});
 const command=safeCommand({command:'bash',args:['-lc','ngrok config add-authtoken TOKEN_POSICIONAL; mysql -pCLAVE_INLINE; app --api-key=API_INLINE']});
@@ -163,7 +169,7 @@ printf '\n== Temporary supervisor and readable logs ==\n'
   done
   HEALTH="$(curl -fsS "http://127.0.0.1:$TEST_PORT/health")"
   printf '%s' "$HEALTH" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const x=JSON.parse(s);if(!x.ok||x.auth!=="none"||x.allowedRoots!==undefined)process.exit(1);});'
-  STATUS_JSON="$(PORT="$TEST_PORT" HOST=127.0.0.1 MCP_EXPOSURE_MODE=local MCP_AUTH_MODE=none MCP_RUNTIME_DIR="$TEST_DIR/runtime" MCP_HUMAN_LOG="$TEST_DIR/runtime/events.log" node runtime-diagnostics.js status)"
+  STATUS_JSON="$(PORT="$TEST_PORT" HOST=127.0.0.1 MCP_EXPOSURE_MODE=local MCP_AUTH_MODE=none MCP_RUNTIME_DIR="$TEST_DIR/runtime" MCP_HUMAN_LOG="$TEST_DIR/runtime/events.log" node lib/runtime-diagnostics.js status)"
   printf '%s' "$STATUS_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const expected=require("./package.json").version;const j=JSON.parse(s);const r=j.runtime&&j.runtime.status;if(!j.ok||!j.launch.temporary||j.launch.persistent||j.config.authMode!=="none"||!r||r.version!==expected||r.toolCount!==72||r.totalToolCount!==72||r.runAsRoot!==false||r.criticalConfirmations!==true) {console.error(j);process.exit(1)}});'
   VIEW="$(PORT="$TEST_PORT" HOST=127.0.0.1 MCP_EXPOSURE_MODE=local MCP_AUTH_MODE=none MCP_RUNTIME_DIR="$TEST_DIR/runtime" MCP_HUMAN_LOG="$TEST_DIR/runtime/events.log" node log-viewer.js --lines 40)"
   grep -q 'ACTIVIDAD DEL SERVIDOR MCP' <<<"$VIEW"

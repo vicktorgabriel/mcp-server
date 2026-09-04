@@ -15,11 +15,11 @@ const http = require('http');
 const path = require('path');
 const readline = require('readline');
 const { URL } = require('url');
-const { createFullControl } = require('./full-control-tools');
-const { createExtendedTools } = require('./extended-tools');
-const { createAccessPolicy, TOOL_REQUIREMENTS } = require('./access-policy');
-const { describeToolStart, describeToolSuccess, friendlyError, humanEvent, redactText } = require('./human-log');
-const { DEFAULT_SCOPE, OAuthProvider, normalizeBaseUrl } = require('./oauth-provider');
+const { createFullControl } = require('./lib/full-control-tools');
+const { createExtendedTools } = require('./lib/extended-tools');
+const { createAccessPolicy, TOOL_REQUIREMENTS } = require('./lib/access-policy');
+const { describeToolStart, describeToolSuccess, friendlyError, humanEvent, redactText } = require('./lib/human-log');
+const { DEFAULT_SCOPE, OAuthProvider, normalizeBaseUrl } = require('./lib/oauth-provider');
 const PACKAGE_VERSION = require('./package.json').version;
 
 loadDotEnv();
@@ -860,7 +860,11 @@ class MCPFileServer {
     try {
       switch (request.method) {
         case 'initialize':
-          humanEvent('CONEXION', `Cliente MCP conectado${context.principal && context.principal.label ? ` mediante ${context.principal.label}` : ''}.`);
+          if (context.authDiscovery && !context.principal) {
+            humanEvent('CONEXION', 'Cliente MCP en descubrimiento sin sesión OAuth; las herramientas protegidas siguen bloqueadas.');
+          } else {
+            humanEvent('CONEXION', `Cliente MCP conectado${context.principal && context.principal.label ? ` mediante ${context.principal.label}` : ''}.`);
+          }
           return createResponse(request.id, this.initialize());
         case 'tools/list':
           return createResponse(request.id, { tools: this.getTools() });
@@ -1576,7 +1580,7 @@ function buildClientConfig(baseUrl, mcp = null) {
       auth: authDisplayName(),
       oauthDiscovery: AUTH_MODE === 'oauth' ? `${normalizedBase}/.well-known/oauth-protected-resource/mcp` : '',
       note: AUTH_MODE === 'oauth'
-        ? 'Elegí OAuth en ChatGPT. La autorización abre una página propia de este servidor.'
+        ? 'En ChatGPT elegí Mixtas. Al invocar una herramienta protegida, Actualizar acceso abre la autorización OAuth de este servidor.'
         : AUTH_MODE === 'none'
           ? 'Elegí Sin autenticación. No se recomienda dejar este modo publicado permanentemente.'
           : 'Usá el token Bearer configurado localmente; el valor nunca se expone por este endpoint.'

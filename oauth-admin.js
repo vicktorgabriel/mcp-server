@@ -2,8 +2,8 @@
 'use strict';
 
 const path = require('path');
-const { configureOAuthAdmin, OAuthStateStore } = require('./oauth-provider');
-const { parseDotEnv } = require('./runtime-diagnostics');
+const { configureOAuthAdmin, OAuthStateStore } = require('./lib/oauth-provider');
+const { parseDotEnv } = require('./lib/runtime-diagnostics');
 
 const ROOT = __dirname;
 const env = parseDotEnv();
@@ -111,13 +111,14 @@ function checkConfigured() {
 
 function resetSessions({ clients = false } = {}) {
   const store = new OAuthStateStore(storePath);
-  store.state.authorizationTransactions = {};
-  store.state.authorizationCodes = {};
-  store.state.accessTokens = {};
-  store.state.refreshTokens = {};
-  store.state.usedRefreshTokens = {};
-  if (clients) store.state.clients = {};
-  store.save();
+  store.mutate((state) => {
+    state.authorizationTransactions = {};
+    state.authorizationCodes = {};
+    state.accessTokens = {};
+    state.refreshTokens = {};
+    state.usedRefreshTokens = {};
+    if (clients) state.clients = {};
+  });
   process.stdout.write(clients
     ? 'Sesiones y clientes OAuth eliminados. ChatGPT deberá registrar y autorizar de nuevo.\n'
     : 'Sesiones OAuth revocadas. ChatGPT deberá autorizar de nuevo.\n');

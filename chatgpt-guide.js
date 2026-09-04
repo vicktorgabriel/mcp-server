@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-const { collectRuntimeStatus, parseDotEnv } = require('./runtime-diagnostics');
+const { collectRuntimeStatus, parseDotEnv } = require('./lib/runtime-diagnostics');
 
 function normalizeBase(value) {
   const raw = String(value || '').trim().replace(/\/+$/, '');
@@ -13,15 +13,16 @@ function normalizeBase(value) {
 function authInstructions(mode) {
   if (mode === 'oauth') {
     return [
-      'Autenticación: elegí OAuth.',
-      'El servidor admite CIMD de ChatGPT y DCR como fallback; no cargues un Client ID manual salvo que uses un cliente pre-registrado.',
-      'Con CIMD ChatGPT usa su URL HTTPS de metadatos como client_id y no realiza un POST de registro.',
+      'Autenticación del servidor: OAuth 2.1. En ChatGPT elegí Mixtas / Mixed authentication.',
+      'Mixtas permite descubrir las herramientas sin sesión, pero el servidor exige OAuth antes de ejecutar cualquiera de ellas.',
+      'Después de crear la app, pedí tool_policy_status y pulsá Actualizar acceso / Update access para abrir el login.',
+      'DCR es el camino predeterminado y validado; no cargues un Client ID manual salvo que uses un cliente pre-registrado.',
+      'CIMD es opcional y falla de forma segura si su documento HTTPS no puede validarse.',
       'El modo predeterminado es cliente público none + PKCE, sin depender de JWKS. private_key_jwt queda disponible como opción avanzada con MCP_OAUTH_PRIVATE_KEY_JWT=1.',
       'Con DCR ChatGPT se registra automáticamente mediante el registration_endpoint publicado.',
       'Desde MCP-Server 4.5.0 el callback específico por conexión es el modo predeterminado; después de actualizar desde 4.4.x, eliminá y recreá la app una vez.',
-      'Cada herramienta declara securitySchemes OAuth y puede disparar el linking mediante mcp/www_authenticate sin ejecutar acciones antes del login.',
-      'Al escanear las herramientas se abrirá la página de autorización del MCP.',
-      'Ingresá el usuario y la contraseña OAuth que configuraste en el primer inicio, revisá el destino y autorizá.'
+      'Cada herramienta declara securitySchemes OAuth y dispara el linking mediante mcp/www_authenticate sin ejecutar acciones antes del login.',
+      'Ingresá el usuario y la contraseña OAuth que configuraste en el primer inicio, revisá el destino y autorizá una sola vez.'
     ];
   }
   if (mode === 'bearer') {
@@ -96,7 +97,8 @@ Pasos en ChatGPT Web:
      o mediante una mención con @, según la interfaz disponible.
 
 Prueba sugerida:
-  Ejecutá tool_policy_status para revisar los permisos publicados y luego
+  Si el servidor usa OAuth, ejecutá tool_policy_status, pulsá Actualizar acceso,
+  completá el login y comprobá que la herramienta responda. Después ejecutá
   control_capabilities para comprobar qué backends existen realmente.
 
 Administración local:
