@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.env.local
+.env.*.local
+.private
+.runtime
+node_modules
+logs
+*.log
+npm-debug.log*
+.vscode
+.idea
+.DS_Store
