@@ -55,6 +55,36 @@ El asistente pregunta:
 
 La configuración se conserva para los próximos inicios.
 
+## Docker
+
+MCP Server también puede ejecutarse con Docker Compose sin modificar la instalación nativa existente.
+
+Para una instalación nueva:
+
+```bash
+cp .env.example .env
+docker compose build
+docker compose run --rm mcp ./mcpctl.sh configure
+docker compose up -d
+```
+
+`docker compose run --rm` inicia un contenedor temporal para ejecutar el asistente interactivo. La configuración generada se conserva en los directorios montados y luego es reutilizada por `docker compose up`.
+
+Si `.env` y `.private` ya están configurados, basta con:
+
+```bash
+docker compose up -d
+```
+
+El directorio de trabajo del host se monta en `/workspace`. Puede seleccionarse explícitamente definiendo `MCP_DOCKER_WORKSPACE` antes de iniciar Compose.
+
+Para revisar el estado y los logs:
+
+```bash
+docker compose ps
+docker compose logs -f mcp
+```
+
 ## Dónde se guardan la configuración y los secretos
 
 | Archivo/directorio | Contenido | Git |
