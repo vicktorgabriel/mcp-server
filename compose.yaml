@@ -1,0 +1,22 @@
+services:
+  mcp:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      ALLOWED_PATHS: /workspace
+      WORKING_DIR: /workspace
+      NGROK_BIN: ngrok
+    volumes:
+      - ./.env:/app/.env
+      - ./.private:/app/.private
+      - ./.runtime:/app/.runtime
+      - ${MCP_DOCKER_WORKSPACE:-..}:/workspace
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
