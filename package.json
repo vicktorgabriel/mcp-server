@@ -4,8 +4,8 @@
   "description": "Servidor MCP local/privado con OAuth 2.1 compatible con ChatGPT y 72 herramientas",
   "main": "mcp-server.js",
   "scripts": {
-    "test": "npm run check && node tests/local-time-self-test.js && node tests/startup-banner-self-test.js && node tests/access-policy-self-test.js && node tests/extended-tools-self-test.js && node tests/auth-mode-self-test.js && node tests/oauth-admin-self-test.js && node tests/oauth-transaction-self-test.js && node tests/oauth-state-concurrency-self-test.js && node tests/oauth-cimd-self-test.js && node tests/oauth-private-key-jwt-self-test.js && node tests/oauth-self-test.js && ./tests/setup-self-test.sh",
-    "check": "node --check mcp-server.js && node --check lib/full-control-tools.js && node --check lib/extended-tools.js && node --check lib/access-policy.js && node --check access-policy-cli.js && node --check startup-banner.js && node --check lib/private-owner.js && node --check lib/runtime-diagnostics.js && node --check mcp-supervisor.js && node --check lib/human-log.js && node --check tests/local-time-self-test.js && node --check log-viewer.js && node --check lib/oauth-provider.js && node --check oauth-admin.js && node --check tests/oauth-admin-self-test.js && node --check tests/oauth-transaction-self-test.js && node --check tests/oauth-state-concurrency-self-test.js && node --check tests/oauth-cimd-self-test.js && node --check tests/oauth-private-key-jwt-self-test.js && node --check chatgpt-guide.js && node --check tests/oauth-self-test.js && node --check tests/auth-mode-self-test.js && node --check tests/access-policy-self-test.js && node --check tests/extended-tools-self-test.js && node --check tests/startup-banner-self-test.js && python3 -c \"from pathlib import Path; p=Path('lib/desktop-control.py'); compile(p.read_text(encoding='utf-8'), str(p), 'exec')\" && bash -n start-mcp.sh setup-mcp.sh configure-mcp.sh configure-ngrok.sh install-service.sh mcpctl.sh install-deps.sh install-ngrok.sh self-test.sh tests/setup-self-test.sh",
+    "test": "npm run check && node tests/local-time-self-test.js && node tests/startup-banner-self-test.js && node tests/access-policy-self-test.js && node tests/extended-tools-self-test.js && node tests/auth-mode-self-test.js && node tests/oauth-admin-self-test.js && node tests/oauth-transaction-self-test.js && node tests/oauth-state-concurrency-self-test.js && node tests/oauth-cimd-self-test.js && node tests/oauth-private-key-jwt-self-test.js && node tests/oauth-self-test.js && node tests/ipc-security-self-test.js && node tests/approvals-self-test.js && node tests/sandbox-ssrf-self-test.js && node tests/mfa-self-test.js && node tests/jobs-self-test.js && node tests/e2e-contracts-v3-self-test.js && node tests/test-correcciones-v5.js && ./tests/setup-self-test.sh",
+    "check": "node --check mcp-server.js && node --check lib/full-control-tools.js && node --check lib/extended-tools.js && node --check lib/access-policy.js && node --check access-policy-cli.js && node --check startup-banner.js && node --check lib/private-owner.js && node --check lib/runtime-diagnostics.js && node --check mcp-supervisor.js && node --check lib/human-log.js && node --check tests/local-time-self-test.js && node --check log-viewer.js && node --check lib/oauth-provider.js && node --check oauth-admin.js && node --check lib/ipc-protocol.js && node --check lib/ipc-gateway.js && node --check lib/ipc-executor.js && node --check lib/sandbox.js && node --check lib/approvals.js && node --check lib/job-manager.js && node --check lib/mfa.js && node --check mcpctl-admin.js && node --check tests/oauth-admin-self-test.js && node --check tests/oauth-transaction-self-test.js && node --check tests/oauth-state-concurrency-self-test.js && node --check tests/oauth-cimd-self-test.js && node --check tests/oauth-private-key-jwt-self-test.js && node --check chatgpt-guide.js && node --check tests/oauth-self-test.js && node --check tests/auth-mode-self-test.js && node --check tests/access-policy-self-test.js && node --check tests/extended-tools-self-test.js && node --check tests/startup-banner-self-test.js && node --check tests/ipc-security-self-test.js && node --check tests/approvals-self-test.js && node --check tests/sandbox-ssrf-self-test.js && node --check tests/mfa-self-test.js && node --check tests/jobs-self-test.js && node --check tests/e2e-contracts-v3-self-test.js && node --check tests/test-correcciones-v5.js && python3 -c \"from pathlib import Path; p=Path('lib/desktop-control.py'); compile(p.read_text(encoding='utf-8'), str(p), 'exec')\" && bash -n start-mcp.sh setup-mcp.sh configure-mcp.sh configure-ngrok.sh install-service.sh mcpctl.sh install-deps.sh install-ngrok.sh self-test.sh tests/setup-self-test.sh",
     "selftest": "./self-test.sh",
     "start": "node mcp-server.js --http",
     "stdio": "node mcp-server.js --stdio",
@@ -27,7 +27,14 @@
     "oauth:admin:test": "node tests/oauth-admin-self-test.js",
     "oauth:cimd:test": "node tests/oauth-cimd-self-test.js",
     "oauth:private-key:test": "node tests/oauth-private-key-jwt-self-test.js",
-    "oauth:transaction:test": "node tests/oauth-transaction-self-test.js"
+    "oauth:transaction:test": "node tests/oauth-transaction-self-test.js",
+    "test:ipc": "node tests/ipc-security-self-test.js",
+    "test:approvals": "node tests/approvals-self-test.js",
+    "test:sandbox": "node tests/sandbox-ssrf-self-test.js",
+    "test:mfa": "node tests/mfa-self-test.js",
+    "test:jobs": "node tests/jobs-self-test.js",
+    "test:contracts": "node tests/e2e-contracts-v3-self-test.js",
+    "test:v5": "node tests/test-correcciones-v5.js"
   },
   "keywords": [
     "mcp",
@@ -41,5 +48,8 @@
   ],
   "author": "",
   "license": "MIT",
-  "dependencies": {}
+  "dependencies": {
+    "@simplewebauthn/browser": "^14.0.0",
+    "@simplewebauthn/server": "^14.0.1"
+  }
 }

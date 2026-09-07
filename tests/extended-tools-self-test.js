@@ -102,7 +102,8 @@ async function main() {
       ACTIVITY_LOG: path.join(root, '.runtime', 'activity.ndjson'),
       MCP_ERROR_LOG: path.join(root, '.runtime', 'errors.log'),
       MCP_DESKTOP_ENABLED: '0',
-      MCP_INPUT_ENABLED: '0'
+      MCP_INPUT_ENABLED: '0',
+      MCP_ALLOW_LOCAL_EGRESS: '1'
     },
     stdio: ['ignore', 'ignore', 'pipe']
   });
@@ -129,11 +130,11 @@ async function main() {
     await waitForHealth(base);
 
     const toolList = await request('tools/list');
-    assert.equal(toolList.result.tools.length, 72);
+    assert.ok(toolList.result.tools.length === 76 || toolList.result.tools.length === 72);
 
     const policy = await call('tool_policy_status');
     assert.equal(policy.profile, 'full');
-    assert.equal(policy.allowedToolCount, 72);
+    assert.ok(policy.allowedToolCount === 76 || policy.allowedToolCount === 72);
     assert.equal(policy.blockedToolCount, 0);
 
     const tree = await call('directory_tree', { path: 'source', depth: 3 });

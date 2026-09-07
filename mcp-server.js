@@ -20,7 +20,18 @@ const { createExtendedTools } = require('./lib/extended-tools');
 const { createAccessPolicy, TOOL_REQUIREMENTS } = require('./lib/access-policy');
 const { describeToolStart, describeToolSuccess, friendlyError, humanEvent, redactText } = require('./lib/human-log');
 const { DEFAULT_SCOPE, OAuthProvider, normalizeBaseUrl } = require('./lib/oauth-provider');
+const { IpcGatewayClient } = require('./lib/ipc-gateway');
+const { JobManager } = require('./lib/job-manager');
+const { ApprovalsManager } = require('./lib/approvals');
 const PACKAGE_VERSION = require('./package.json').version;
+const {
+  isSensitiveFile,
+  isServerControlPlaneFile,
+  isSubpathOrEqual,
+  assertRestrictedIsolationAllowed,
+  wrapCommandInSandbox
+} = require('./lib/sandbox');
+const { resolveExecutionContext } = require('./lib/ipc-executor');
 
 loadDotEnv();
 
@@ -114,6 +125,10 @@ class Logger {
 
   static toolFailure(tool, error, durationMs) {
     humanEvent('ERROR', `La herramienta ${tool || 'desconocida'} no pudo completar la tarea después de ${Math.max(0, Number(durationMs || 0))} ms: ${friendlyError(error)}`);
+  }
+
+  static humanEvent(category, message) {
+    return humanEvent(category, message);
   }
 }
 
@@ -443,14 +458,18 @@ function containmentPath(candidate) {
   return path.resolve(realExisting, remainder);
 }
 
-function resolvePath(userPath = '.') {
+function resolvePath(userPath = '.', pathOptions = {}) {
   const rawPath = String(userPath || '.');
+  const isFull = Boolean(FULL_ACCESS || pathOptions.isFullAccess);
 
-  if (FULL_ACCESS) {
+  if (isFull) {
     const base = path.resolve(process.env.WORKING_DIR || process.cwd());
     const candidate = path.isAbsolute(rawPath)
       ? path.resolve(rawPath)
       : path.resolve(base, rawPath);
+    if (pathOptions.isMutating && isServerControlPlaneFile(candidate)) {
+      throw new Error(`Acceso denegado: ${path.basename(candidate)} es un archivo de control del servidor MCP protegido contra modificación.`);
+    }
     return { fullPath: candidate, displayPath: candidate, root: path.resolve('/') };
   }
 
@@ -458,9 +477,18 @@ function resolvePath(userPath = '.') {
     ? path.resolve(rawPath)
     : path.resolve(ALLOWED_ROOTS[0], rawPath);
   const effectiveCandidate = containmentPath(candidate);
-  const root = ALLOWED_ROOTS.find((allowedRoot) => isInside(allowedRoot, effectiveCandidate));
+
+  if (!pathOptions.allowSensitive && isSensitiveFile(effectiveCandidate)) {
+    throw new Error(`Acceso denegado: ${path.basename(effectiveCandidate)} es un archivo o directorio protegido.`);
+  }
+
+  const root = ALLOWED_ROOTS.find((allowedRoot) => isSubpathOrEqual(effectiveCandidate, allowedRoot));
   if (!root) {
     throw new Error(`Path is outside allowed roots or escapes through a symbolic link: ${rawPath}`);
+  }
+
+  if (pathOptions.isMutating && isServerControlPlaneFile(effectiveCandidate)) {
+    throw new Error(`Acceso denegado: ${path.basename(effectiveCandidate)} es un archivo de control del servidor MCP protegido contra modificación.`);
   }
 
   return {
@@ -587,6 +615,36 @@ const TOOL_OUTPUT_SCHEMAS = {
       stderr: { type: 'string' }
     },
     required: ['command', 'args', 'cwd', 'shell', 'exit_code', 'signal', 'timed_out', 'stdout', 'stderr']
+  },
+  job_start: {
+    type: 'object',
+    properties: {
+      jobId: { type: 'string' },
+      command: { type: 'string' },
+      status: { type: 'string' }
+    }
+  },
+  job_status: {
+    type: 'object',
+    properties: {
+      jobId: { type: 'string' },
+      status: { type: 'string' }
+    }
+  },
+  job_output: {
+    type: 'object',
+    properties: {
+      jobId: { type: 'string' },
+      output: { type: 'string' },
+      bytesRead: { type: 'number' }
+    }
+  },
+  job_cancel: {
+    type: 'object',
+    properties: {
+      jobId: { type: 'string' },
+      cancelled: { type: 'boolean' }
+    }
   }
 };
 
@@ -660,11 +718,36 @@ function summarizeToolArgs(tool, args) {
 
 class MCPFileServer {
   constructor() {
-    this.fullControl = createFullControl({ resolvePath, buildToolMetadata, textResult });
-    this.extendedTools = createExtendedTools({ resolvePath, buildToolMetadata, textResult });
     this.accessPolicy = ACCESS_POLICY;
+    this.fullControl = createFullControl({
+      resolvePath,
+      buildToolMetadata,
+      textResult,
+      allowedRoots: ALLOWED_ROOTS,
+      accessPolicy: this.accessPolicy
+    });
+    this.extendedTools = createExtendedTools({
+      resolvePath,
+      buildToolMetadata,
+      textResult,
+      allowedRoots: ALLOWED_ROOTS,
+      accessPolicy: this.accessPolicy
+    });
     this.allTools = Object.freeze(this.getAllTools());
-    this.publishedTools = Object.freeze(this.accessPolicy.filterTools(this.allTools));
+    this.approvals = new ApprovalsManager();
+    this.ipcGateway = null;
+    const ipcSocketPath = process.env.MCP_IPC_SOCKET || process.env.MCP_IPC_SOCK || path.resolve('.runtime/ipc/mcp.sock');
+    const useIpc = process.env.MCP_IPC_ENABLED === '1' || process.env.MCP_REQUIRE_IPC === '1' ||
+      this.accessPolicy.profile === 'trabajo_restringido' || fs.existsSync(ipcSocketPath);
+    if (useIpc && process.env.MCP_DISABLE_IPC !== '1') {
+      try {
+        this.ipcGateway = new IpcGatewayClient({
+          sockPath: ipcSocketPath,
+          autoSpawn: process.env.MCP_IPC_AUTOSPAWN !== '0'
+        });
+      } catch (_) {}
+    }
+    this.jobManager = new JobManager();
   }
 
   getAllTools() {
@@ -739,7 +822,9 @@ class MCPFileServer {
         inputSchema: {
           type: 'object',
           properties: {
-            path: { type: 'string', description: 'Relative or allowed absolute file path.' }
+            path: { type: 'string', description: 'Relative or allowed absolute file path.' },
+            offset: { type: 'number', description: 'Byte offset from start of file.' },
+            limit: { type: 'number', description: 'Maximum bytes to read.' }
           },
           required: ['path']
         },
@@ -763,6 +848,10 @@ class MCPFileServer {
               enum: ['write', 'append'],
               description: 'write overwrites the file; append adds to the end.',
               default: 'write'
+            },
+            preview: {
+              type: 'boolean',
+              description: 'If true, shows diff preview without modifying the file.'
             }
           },
           required: ['path', 'content']
@@ -823,13 +912,67 @@ class MCPFileServer {
           required: ['command']
         },
         outputSchema: TOOL_OUTPUT_SCHEMAS.run_command
+      },
+      // Async Job Tools
+      {
+        name: 'job_start',
+        ...buildToolMetadata('Start Background Job', { destructiveHint: true }),
+        description: 'Inicia un comando en segundo plano con seguimiento y límites de recursos.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            command: { type: 'string', description: 'Ejecutable.' },
+            args: { type: 'array', items: { type: 'string' }, description: 'Argumentos.' },
+            cwd: { type: 'string', description: 'Directorio de trabajo.' },
+            timeoutMs: { type: 'number', description: 'Tiempo límite.' }
+          },
+          required: ['command']
+        },
+        outputSchema: TOOL_OUTPUT_SCHEMAS.job_start
+      },
+      {
+        name: 'job_status',
+        ...buildToolMetadata('Check Job Status', { readOnlyHint: true }),
+        description: 'Consulta el estado de un trabajo en segundo plano propio del cliente autenticado.',
+        inputSchema: {
+          type: 'object',
+          properties: { jobId: { type: 'string', description: 'Identificador del trabajo.' } },
+          required: ['jobId']
+        },
+        outputSchema: TOOL_OUTPUT_SCHEMAS.job_status
+      },
+      {
+        name: 'job_output',
+        ...buildToolMetadata('Read Job Output', { readOnlyHint: true }),
+        description: 'Lee la salida generada por un trabajo en segundo plano con paginación.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            jobId: { type: 'string', description: 'Identificador del trabajo.' },
+            offset: { type: 'number', description: 'Offset de bytes.' },
+            limit: { type: 'number', description: 'Cantidad máxima de bytes.' }
+          },
+          required: ['jobId']
+        },
+        outputSchema: TOOL_OUTPUT_SCHEMAS.job_output
+      },
+      {
+        name: 'job_cancel',
+        ...buildToolMetadata('Cancel Job', { destructiveHint: true }),
+        description: 'Cancela un trabajo en segundo plano y todo su árbol de procesos asociados.',
+        inputSchema: {
+          type: 'object',
+          properties: { jobId: { type: 'string', description: 'Identificador del trabajo.' } },
+          required: ['jobId']
+        },
+        outputSchema: TOOL_OUTPUT_SCHEMAS.job_cancel
       }
     ];
     return [...baseTools, ...this.fullControl.tools, ...this.extendedTools.tools];
   }
 
-  getTools() {
-    return this.publishedTools || this.accessPolicy.filterTools(this.getAllTools());
+  getTools(clientContext = {}) {
+    return this.accessPolicy.filterTools(this.getAllTools(), clientContext);
   }
 
   policySummary() {
@@ -867,20 +1010,46 @@ class MCPFileServer {
           }
           return createResponse(request.id, this.initialize());
         case 'tools/list':
-          return createResponse(request.id, { tools: this.getTools() });
+          return createResponse(request.id, { tools: this.getTools(context.principal || {}) });
         case 'tools/call': {
           const params = request.params || {};
           const toolArgs = params.arguments || {};
+          const approvalId = params.approvalId || (toolArgs && (toolArgs.approvalId || toolArgs._approvalId || toolArgs.approval_id)) || context.approvalId;
+          const execContext = { ...context, approvalId };
           const started = Date.now();
-          Logger.toolStart(params.name, toolArgs, context);
+          const t_auth_ms = context.t_auth_ms || 0;
+          const t_policy_start = Date.now();
+          this.accessPolicy.assertAllowed(params.name, context.principal);
+          const t_policy_ms = Date.now() - t_policy_start;
+          Logger.toolStart(params.name, toolArgs, execContext);
           try {
-            const result = await this.callTool(params.name, toolArgs);
+            const t_exec_start = Date.now();
+            const result = await this.callTool(params.name, toolArgs, execContext);
+            const t_executor_ms = Date.now() - t_exec_start;
             const durationMs = Date.now() - started;
+            const bytesOut = Buffer.byteLength(JSON.stringify(result || {}), 'utf8');
+
+            const clientLabel = (context.principal && (context.principal.clientName || context.principal.label)) || 'cliente_local';
+            const authType = (context.principal && context.principal.authMode) || (context.auth && context.auth.mode) || 'none';
+            const policyProfile = (this.accessPolicy && this.accessPolicy.profile) || 'desconocida';
+            const execMode = (this.ipcGateway && this.ipcGateway.connected) ? 'ipc_socket' : 'interno';
+
+            humanEvent('FLUJO', `[req-${request.id !== undefined ? request.id : 'std'}] Cliente(${clientLabel}) -> Autenticación(${authType}) -> Política(${policyProfile}) -> Ejecutor(${execMode}) -> Resultado(ok, ${durationMs}ms, ${bytesOut}B)`);
+
             Logger.activity({
               method: 'tools/call',
+              requestId: request.id,
+              flow: `${clientLabel} -> ${authType} -> ${policyProfile} -> ${execMode} -> ok`,
               tool: params.name,
               args: summarizeToolArgs(params.name, toolArgs),
               actor: context.principal && context.principal.label || '',
+              timings: {
+                t_auth_ms,
+                t_policy_ms,
+                t_executor_ms,
+                durationMs
+              },
+              bytesOut,
               durationMs,
               ok: true
             });
@@ -888,8 +1057,17 @@ class MCPFileServer {
             return createResponse(request.id, result);
           } catch (error) {
             const durationMs = Date.now() - started;
+            const clientLabel = (context.principal && (context.principal.clientName || context.principal.label)) || 'cliente_local';
+            const authType = (context.principal && context.principal.authMode) || (context.auth && context.auth.mode) || 'none';
+            const policyProfile = (this.accessPolicy && this.accessPolicy.profile) || 'desconocida';
+            const execMode = (this.ipcGateway && this.ipcGateway.connected) ? 'ipc_socket' : 'interno';
+
+            humanEvent('FLUJO', `[req-${request.id !== undefined ? request.id : 'std'}] Cliente(${clientLabel}) -> Autenticación(${authType}) -> Política(${policyProfile}) -> Ejecutor(${execMode}) -> Resultado(error: ${error.message}, ${durationMs}ms)`);
+
             Logger.activity({
               method: 'tools/call',
+              requestId: request.id,
+              flow: `${clientLabel} -> ${authType} -> ${policyProfile} -> ${execMode} -> error`,
               tool: params.name,
               args: summarizeToolArgs(params.name, toolArgs),
               actor: context.principal && context.principal.label || '',
@@ -908,41 +1086,162 @@ class MCPFileServer {
       }
     } catch (error) {
       Logger.error(`Error handling ${request.method}`, error);
-      return createError(request.id, -32603, error.message);
+      const code = error.isApprovalRequired || error.code === -32001 ? -32001 : (error.code || -32603);
+      const data = error.data || (error.isApprovalRequired ? { approvalId: error.approvalId, argsSummary: error.argsSummary, status: 'pending' } : undefined);
+      return createError(request.id, code, error.message, data);
     }
   }
 
-  async callTool(name, args) {
-    this.accessPolicy.assertAllowed(name);
+  async callTool(name, args, context = {}) {
+    // Sanitize client-supplied arguments
+    if (args && typeof args === 'object') {
+      delete args._approvedByApprovalId;
+      delete args._approved;
+      delete args._approvedByApprovalIdVerified;
+    }
+
+    const pauseFile = process.env.MCP_PAUSE_FILE || path.resolve('.runtime/server-paused');
+    if (fs.existsSync(pauseFile) && name !== 'tool_policy_status') {
+      throw new Error('El servidor MCP se encuentra en pausa administrativa.');
+    }
+
+    this.accessPolicy.assertAllowed(name, context.principal || context);
+
+    const approvalId = context.approvalId || (args && (args.approvalId || args._approvalId || args.approval_id));
+
+    // Unified execution context per call
+    const execContext = resolveExecutionContext(this.accessPolicy, context, args);
+    const clientId = execContext.clientId;
+    const clientPolicy = execContext.clientPolicy;
+    const isRestrictedExecution = execContext.isRestrictedExecution;
+    const isFullAccess = execContext.isFullAccess;
+    const requiresSecureExecutor = process.env.MCP_REQUIRE_IPC === '1' || isRestrictedExecution;
+
+    if (this.ipcGateway) {
+      // IPC gateway is configured: dispatch through IPC. Never fall back to internal switch on failure.
+      return await this.ipcGateway.callTool(name, args, { ...context, approvalId, execContext });
+    }
+
+    if (process.env.MCP_REQUIRE_IPC === '1' && !this.ipcGateway) {
+      throw new Error(
+        `La ejecución de herramientas requiere un ejecutor IPC aislado activo (MCP_REQUIRE_IPC: 1). Fallo cerrado sin ruta de escape.`
+      );
+    }
+
+    if (isRestrictedExecution) {
+      // "Si no hay ejecutor adecuado, rechazar antes de ejecutar."
+      assertRestrictedIsolationAllowed();
+      if (args && args.shell) {
+        throw new Error('La opción shell:true está estrictamente denegada en el perfil de trabajo restringido.');
+      }
+      if (name.startsWith('tmux_')) {
+        throw new Error('La capacidad tmux está estrictamente denegada en el perfil de trabajo restringido porque no puede ser confinada dentro del aislamiento del SO.');
+      }
+    }
+
+    // In-process approval enforcement
+    const currentPolicyVersion = this.accessPolicy.getVersion ? this.accessPolicy.getVersion(clientId) : (this.accessPolicy.version || '1');
+
+    const envForApprovals = {
+      ...process.env,
+      ...(this.accessPolicy && this.accessPolicy.criticalConfirmations !== undefined
+        ? { criticalConfirmations: this.accessPolicy.criticalConfirmations, MCP_CRITICAL_CONFIRMATIONS: this.accessPolicy.criticalConfirmations ? '1' : '0' }
+        : {}),
+      ...(this.accessPolicy && this.accessPolicy.toolApprovals !== undefined
+        ? { MCP_TOOL_APPROVALS: this.accessPolicy.toolApprovals }
+        : {})
+    };
+
+    const requiresApproval = this.approvals.isApprovalRequired
+      ? this.approvals.isApprovalRequired(name, args, envForApprovals, clientPolicy)
+      : false;
+
+    if (requiresApproval || approvalId) {
+      if (!approvalId) {
+        const pending = this.approvals.createPendingApproval({
+          clientId,
+          tool: name,
+          args,
+          scope: 'tool_execution',
+          policyVersion: currentPolicyVersion
+        });
+        const err = new Error(`Aprobación requerida: la acción '${name}' exige confirmación humana local.`);
+        err.isApprovalRequired = true;
+        err.approvalId = pending.id;
+        err.argsSummary = pending.argsSummary;
+        throw err;
+      } else {
+        this.approvals.consumeApproval({
+          id: approvalId,
+          clientId,
+          tool: name,
+          args,
+          policyVersion: currentPolicyVersion
+        });
+        if (args && typeof args === 'object') {
+          args._approvedByApprovalId = approvalId;
+          args._approvedByApprovalIdVerified = true;
+        }
+      }
+    }
+
+    // In-process fallback dispatch
+    const pathOptions = { isFullAccess, allowSensitive: isFullAccess };
     switch (name) {
       case 'tool_policy_status':
         return textResult(this.policySummary());
       case 'search':
-        return textResult(this.searchFiles(args));
+        return textResult(this.searchFiles(args, pathOptions));
       case 'fetch':
-        return textResult(this.fetchFile(args.id || args.path));
+        return textResult(this.fetchFile(args.id || args.path, pathOptions));
       case 'list_files':
-        return textResult(this.listFiles(args.path || '.'));
+        return textResult(this.listFiles(args.path || '.', pathOptions));
       case 'read_file':
-        return textResult(this.readFile(args.path));
+        return textResult(this.readFile(args.path, args.offset, args.limit, pathOptions));
       case 'write_file':
-        return textResult(this.writeFile(args.path, args.content, args.mode || 'write'));
+        return textResult(this.writeFile(args.path, args.content, args.mode || 'write', args.preview, { ...pathOptions, isMutating: true }));
       case 'patch_file':
-        return textResult(this.patchFile(args.path, args.patches));
+        return textResult(this.patchFile(args.path, args.patches, { ...pathOptions, isMutating: true }));
       case 'run_command':
-        return textResult(await this.runCommand(args));
+        return textResult(await this.runCommand(args, execContext));
+      case 'job_start': {
+        let effectiveCmd = String(args.command || '').trim();
+        let effectiveArgs = Array.isArray(args.args) ? args.args.map(String) : [];
+        const cwd = args.cwd ? resolvePath(args.cwd, pathOptions).fullPath : DEFAULT_ROOT;
+        if (isRestrictedExecution) {
+          const wrapped = wrapCommandInSandbox(effectiveCmd, effectiveArgs, { allowedRoots: ALLOWED_ROOTS, cwd }, process.env);
+          effectiveCmd = wrapped.command;
+          effectiveArgs = wrapped.args;
+        }
+        return textResult(this.jobManager.startJob({
+          clientId,
+          command: effectiveCmd,
+          args: effectiveArgs,
+          cwd,
+          timeoutMs: args.timeoutMs
+        }));
+      }
+      case 'job_status':
+        return textResult(this.jobManager.getJob(args.jobId, clientId));
+      case 'job_output':
+        return textResult(this.jobManager.getJobOutput(args.jobId, clientId, args.offset, args.limit));
+      case 'job_cancel':
+        return textResult(this.jobManager.cancelJob(args.jobId, clientId));
       default: {
-        const extended = await this.extendedTools.callTool(name, args);
+        if (isRestrictedExecution && name.startsWith('tmux_')) {
+          throw new Error('La capacidad tmux está estrictamente denegada en el perfil de trabajo restringido porque no puede ser confinada dentro del aislamiento del SO.');
+        }
+        const extended = await this.extendedTools.callTool(name, args, execContext);
         if (extended !== null) return extended;
-        const extra = await this.fullControl.callTool(name, args);
+        const extra = await this.fullControl.callTool(name, args, execContext);
         if (extra !== null) return extra;
         throw new Error(`Tool not found: ${name}`);
       }
     }
   }
 
-  listFiles(dirPath = '.') {
-    const { fullPath, displayPath } = resolvePath(dirPath);
+  listFiles(dirPath = '.', pathOptions = {}) {
+    const { fullPath, displayPath } = resolvePath(dirPath, pathOptions);
     const stats = fs.statSync(fullPath);
     if (!stats.isDirectory()) throw new Error(`Not a directory: ${dirPath}`);
 
@@ -958,29 +1257,67 @@ class MCPFileServer {
     return { path: displayPath, files };
   }
 
-  readFile(filePath) {
+  readFile(filePath, offset = undefined, limit = undefined, pathOptions = {}) {
     if (!filePath) throw new Error('path is required');
-    const { fullPath, displayPath } = resolvePath(filePath);
+    const { fullPath, displayPath } = resolvePath(filePath, pathOptions);
     const stats = fs.statSync(fullPath);
     if (!stats.isFile()) throw new Error(`Not a file: ${filePath}`);
 
     const maxBytes = Number(process.env.READ_LIMIT_BYTES || 10 * 1024 * 1024);
-    if (stats.size > maxBytes) throw new Error(`File too large: ${stats.size} bytes (limit ${maxBytes})`);
+    if (stats.size > maxBytes && offset === undefined && limit === undefined) {
+      throw new Error(`File too large: ${stats.size} bytes (limit ${maxBytes})`);
+    }
+
+    if (offset !== undefined || limit !== undefined) {
+      const fd = fs.openSync(fullPath, 'r');
+      try {
+        const off = Math.max(0, Number(offset) || 0);
+        const lim = limit !== undefined ? Math.max(1, Math.min(Number(limit), 10 * 1024 * 1024)) : stats.size;
+        const buffer = Buffer.alloc(Math.min(lim, Math.max(0, stats.size - off)));
+        fs.readSync(fd, buffer, 0, buffer.length, off);
+        const hash = crypto.createHash('sha256').update(buffer).digest('hex');
+        return {
+          path: displayPath,
+          totalSize: stats.size,
+          size: stats.size,
+          offset: off,
+          bytesRead: buffer.length,
+          sha256: hash,
+          content: buffer.toString('utf8'),
+          modified: stats.mtime.toISOString()
+        };
+      } finally {
+        fs.closeSync(fd);
+      }
+    }
 
     return {
       path: displayPath,
       content: fs.readFileSync(fullPath, 'utf8'),
       size: stats.size,
+      totalSize: stats.size,
       modified: stats.mtime.toISOString()
     };
   }
 
-  writeFile(filePath, content, mode = 'write') {
+  writeFile(filePath, content, mode = 'write', preview = false, pathOptions = {}) {
     if (!filePath) throw new Error('path is required');
+    const { fullPath, displayPath } = resolvePath(filePath, pathOptions);
+
+    if (preview) {
+      const oldContent = fs.existsSync(fullPath) ? fs.readFileSync(fullPath, 'utf8') : '';
+      return {
+        preview: true,
+        path: displayPath,
+        originalLength: oldContent.length,
+        newLength: String(content).length,
+        status: fs.existsSync(fullPath) ? 'modificación' : 'creación'
+      };
+    }
+
     if (typeof content !== 'string') throw new Error('content must be a string');
     if (!['write', 'append'].includes(mode)) throw new Error('mode must be "write" or "append"');
 
-    const { fullPath, displayPath } = resolvePath(filePath);
     fs.mkdirSync(path.dirname(fullPath), { recursive: true });
 
     if (mode === 'append') {
@@ -1007,12 +1344,12 @@ class MCPFileServer {
     };
   }
 
-  patchFile(filePath, patches) {
+  patchFile(filePath, patches, pathOptions = {}) {
     if (!Array.isArray(patches) || patches.length === 0) {
       throw new Error('patches must be a non-empty array');
     }
 
-    const { fullPath, displayPath } = resolvePath(filePath);
+    const { fullPath, displayPath } = resolvePath(filePath, pathOptions);
     const stats = fs.statSync(fullPath);
     if (!stats.isFile()) throw new Error(`Not a file: ${filePath}`);
 
@@ -1068,23 +1405,43 @@ class MCPFileServer {
     };
   }
 
-  runCommand(args) {
+  runCommand(args, execContext = {}) {
+    const isRestricted = Boolean(
+      execContext.isRestrictedExecution ||
+      this.accessPolicy.profile === 'trabajo_restringido'
+    );
     const command = String(args.command || '').trim();
     if (!command) throw new Error('command is required');
     if (command.includes('/') || command.includes('\\')) {
-      resolvePath(command);
+      const isManagedRuntime = command === process.execPath || /^(?:\/usr(?:\/local)?|\/bin|\/sbin)(?:\/|$)/.test(command);
+      if (!isManagedRuntime) {
+        resolvePath(command, { isFullAccess: execContext.isFullAccess });
+      }
     }
 
     const commandArgs = Array.isArray(args.args) ? args.args.map(String) : [];
-    const cwd = resolvePath(args.cwd || '.').fullPath;
+    const cwd = resolvePath(args.cwd || '.', { isFullAccess: execContext.isFullAccess }).fullPath;
     const timeoutMs = Math.max(1000, Math.min(Number(args.timeoutMs || 30000), 120000));
     const shell = Boolean(args.shell);
 
+    let execCmd = command;
+    let execArgs = commandArgs;
+
+    if (isRestricted) {
+      if (shell) {
+        throw new Error('La opción shell:true está estrictamente denegada en el perfil de trabajo restringido.');
+      }
+      assertRestrictedIsolationAllowed();
+      const wrapped = wrapCommandInSandbox(command, commandArgs, { allowedRoots: ALLOWED_ROOTS, cwd }, process.env);
+      execCmd = wrapped.command;
+      execArgs = wrapped.args;
+    }
+
     return new Promise((resolve, reject) => {
       const { MCP_AUTH_TOKEN: _token, ...safeEnv } = process.env;
-      const child = spawn(command, commandArgs, {
+      const child = spawn(execCmd, execArgs, {
         cwd,
-        shell,
+        shell: isRestricted ? false : shell,
         env: safeEnv
       });
 
@@ -1129,17 +1486,17 @@ class MCPFileServer {
     });
   }
 
-  fetchFile(id) {
+  fetchFile(id, pathOptions = {}) {
     if (!id) throw new Error('id is required');
-    return this.readFile(id.replace(/^file:/, ''));
+    return this.readFile(id.replace(/^file:/, ''), undefined, undefined, pathOptions);
   }
 
-  searchFiles(args) {
+  searchFiles(args, pathOptions = {}) {
     const query = String(args.query || '').toLowerCase();
     if (!query) throw new Error('query is required');
 
     const limit = Math.max(1, Math.min(Number(args.limit || 20), 100));
-    const start = resolvePath(args.path || '.').fullPath;
+    const start = resolvePath(args.path || '.', pathOptions).fullPath;
     const cacheKey = `${start}\u0000${query}\u0000${limit}`;
     const cached = getCachedSearchResult(cacheKey);
     if (cached) return cached;
@@ -1391,7 +1748,9 @@ function startHttp() {
         return;
       }
 
+      const authStart = Date.now();
       const authResult = authenticateHttpRequest(req, baseUrl);
+      const t_auth_ms = Date.now() - authStart;
 
       if (AUTH_MODE === 'oauth' && !authResult.ok && authResult.reason === 'missing_token' && url.pathname === '/mcp' && req.method === 'POST') {
         const body = await readJsonBody(req);
@@ -1415,7 +1774,7 @@ function startHttp() {
         sendAuthError(req, res, baseUrl, authResult);
         return;
       }
-      const requestContext = { principal: authResult.principal, baseUrl };
+      const requestContext = { principal: authResult.principal, baseUrl, t_auth_ms };
 
       if (url.pathname === '/config' && req.method === 'GET') {
         sendJson(res, 200, buildClientConfig(baseUrl, mcp));
@@ -1423,7 +1782,7 @@ function startHttp() {
       }
 
       if (url.pathname === '/tools' && req.method === 'GET') {
-        sendJson(res, 200, { tools: mcp.getTools() });
+        sendJson(res, 200, { tools: mcp.getTools(authResult.principal || {}) });
         return;
       }
 
@@ -1635,10 +1994,13 @@ function startStdio() {
   });
 }
 
-const mode = process.argv.includes('--http') ? 'http' : 'stdio';
-
-if (mode === 'http') {
-  startHttp();
-} else {
-  startStdio();
+if (require.main === module) {
+  const mode = process.argv.includes('--http') ? 'http' : 'stdio';
+  if (mode === 'http') {
+    startHttp();
+  } else {
+    startStdio();
+  }
 }
+
+module.exports = { MCPFileServer };

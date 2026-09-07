@@ -8,12 +8,13 @@ const { collectRuntimeStatus, parseDotEnv, redactText } = require('./lib/runtime
 const ROOT = __dirname;
 
 function parseArgs(argv) {
-  const options = { lines: 80, follow: false, noHeader: false, summaryOnly: false };
+  const options = { lines: 80, follow: false, noHeader: false, summaryOnly: false, activity: false };
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
     if (value === '--follow' || value === '-f') options.follow = true;
     else if (value === '--no-header') options.noHeader = true;
     else if (value === '--summary-only') options.summaryOnly = true;
+    else if (value === '--activity' || value === '--flow' || value === '--trace') options.activity = true;
     else if (value === '--lines' || value === '-n') {
       options.lines = Math.max(1, Math.min(5000, Number(argv[index + 1] || 80)));
       index += 1;
@@ -27,6 +28,12 @@ function parseArgs(argv) {
 function eventPath() {
   const env = parseDotEnv();
   const configured = process.env.MCP_HUMAN_LOG || env.MCP_HUMAN_LOG || path.join('.runtime', 'events.log');
+  return path.isAbsolute(configured) ? configured : path.resolve(ROOT, configured);
+}
+
+function activityPath() {
+  const env = parseDotEnv();
+  const configured = process.env.ACTIVITY_LOG || env.ACTIVITY_LOG || path.join('.runtime', 'activity.ndjson');
   return path.isAbsolute(configured) ? configured : path.resolve(ROOT, configured);
 }
 
@@ -154,17 +161,41 @@ function followFile(filePath, startOffset) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const filePath = eventPath();
+  const filePath = options.activity ? activityPath() : eventPath();
   const status = await collectRuntimeStatus();
   if (!options.noHeader) await printHeader(status, !options.summaryOnly);
 
   if (options.summaryOnly) return;
 
+  if (options.activity) {
+    process.stdout.write('HORA      ID          HERRAMIENTA          CLIENTE          ESTADO   TIEMPO    BYTES   FLUJO\n');
+    process.stdout.write('--------------------------------------------------------------------------------------------------------\n');
+  }
+
   const lines = readTail(filePath, options.lines);
   if (lines.length === 0) {
     process.stdout.write('Todavía no hay actividad registrada.\n');
   } else {
-    for (const line of lines) displayLine(line);
+    for (const line of lines) {
+      if (options.activity) {
+        try {
+          const item = JSON.parse(line);
+          const when = item.ts ? new Date(item.ts).toLocaleTimeString() : '--:--:--';
+          const id = String(item.requestId !== undefined ? `req-${item.requestId}` : '-').padEnd(10);
+          const tool = String(item.tool || '-').padEnd(20);
+          const client = String(item.actor || item.client || '-').slice(0, 15).padEnd(16);
+          const st = (item.ok ? 'OK' : 'ERROR').padEnd(8);
+          const dur = `${item.durationMs || 0}ms`.padEnd(9);
+          const bytes = String(item.bytesOut !== undefined ? `${item.bytesOut}B` : '-').padEnd(7);
+          const flow = item.flow ? ` ${item.flow}` : '';
+          process.stdout.write(`${when}  ${id}  ${tool} ${client} ${st} ${dur} ${bytes}${flow}\n`);
+        } catch (_) {
+          process.stdout.write(`${line}\n`);
+        }
+      } else {
+        displayLine(line);
+      }
+    }
   }
 
   if (options.follow) {

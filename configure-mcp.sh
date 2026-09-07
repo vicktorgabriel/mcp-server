@@ -10,10 +10,30 @@ INTERACTIVE=0
 [ -t 0 ] && [ -t 1 ] && INTERACTIVE=1
 [ "${MCP_SETUP_NONINTERACTIVE:-0}" = "1" ] && INTERACTIVE=0
 
+USE_COLOR=0
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  USE_COLOR=1
+fi
+
+if [ "$USE_COLOR" = "1" ]; then
+  C_RESET=$'\033[0m'
+  C_CYAN=$'\033[0;36m'
+  C_GREEN=$'\033[0;32m'
+  C_YELLOW=$'\033[0;33m'
+  C_RED=$'\033[0;31m'
+else
+  C_RESET=''
+  C_CYAN=''
+  C_GREEN=''
+  C_YELLOW=''
+  C_RED=''
+fi
+
 line() { printf '%*s\n' 76 '' | tr ' ' '='; }
-info() { printf '[INFO] %s\n' "$*"; }
-warn() { printf '[AVISO] %s\n' "$*" >&2; }
-err() { printf '[ERROR] %s\n' "$*" >&2; }
+info() { printf "${C_CYAN}[INFO]${C_RESET} %s\n" "$*"; }
+warn() { printf "${C_YELLOW}[AVISO]${C_RESET} %s\n" "$*" >&2; }
+err() { printf "${C_RED}[ERROR]${C_RESET} %s\n" "$*" >&2; }
+
 
 cleanup_pids=()
 DIRECT_FIREWALL_REQUESTED=0
@@ -325,6 +345,63 @@ configure_ngrok() {
   PUBLIC_URL_RESULT="$detected"
 }
 
+configure_cloudflare() {
+  local port="$1" bin url tunnel_id creds_file config hostname
+  bin="$(command -v cloudflared 2>/dev/null || true)"
+  line
+  echo ' CONFIGURACIÓN DE CLOUDFLARE TUNNEL'
+  line
+  echo 'Cloudflare Tunnel permite publicar el MCP con tu propio dominio sin abrir puertos en el router.'
+  echo 'Pasos externos necesarios:'
+  echo '  1. Crear un túnel en Cloudflare Zero Trust (o mediante `cloudflared tunnel create <nombre>`).'
+  echo '  2. Crear un registro CNAME en tu DNS que apunte a <TUNNEL_ID>.cfargotunnel.com.'
+  echo '  3. Colocar el archivo de credenciales JSON descargado en .private/cloudflared.json.'
+  echo
+  if [ -z "$bin" ]; then
+    warn 'cloudflared no está instalado en el PATH. Consultá docs/CLOUDFLARE_WAF.md para instalarlo.'
+    bin='cloudflared'
+  fi
+
+  url="$(prompt_text MCP_SETUP_CLOUDFLARE_URL 'URL pública completa configurada en Cloudflare (ej: https://mcp.tudominio.com)' "$(read_env PUBLIC_BASE_URL)")"
+  url="$(normalize_url "$url" https)"
+  hostname="$(node - "$url" <<'NODE'
+try { const u=new URL(process.argv[2]); process.stdout.write(u.hostname); } catch(_) {}
+NODE
+)"
+  tunnel_id="$(prompt_text MCP_SETUP_CLOUDFLARE_TUNNEL_ID 'Tunnel ID o nombre del túnel' "$(read_env CLOUDFLARE_TUNNEL_ID || echo 'mcp-server')")"
+
+  config="$PRIVATE_DIR/cloudflared.yml"
+  creds_file="$PRIVATE_DIR/cloudflared.json"
+
+  cat > "$config" <<EOF
+tunnel: ${tunnel_id}
+credentials-file: ${creds_file}
+ingress:
+  - hostname: ${hostname}
+    service: http://127.0.0.1:${port}
+    originRequest:
+      noTLSVerify: false
+  - service: http_status:404
+EOF
+  chmod 600 "$config"
+
+  set_env \
+    "PORT=$port" \
+    'HOST=127.0.0.1' \
+    'MCP_EXPOSURE_MODE=cloudflare' \
+    "CLOUDFLARED_BIN=$bin" \
+    'CLOUDFLARED_CONFIG=.private/cloudflared.yml' \
+    "CLOUDFLARE_TUNNEL_ID=$tunnel_id" \
+    'NGROK_URL=' \
+    'NGROK_DOMAIN=' \
+    "PUBLIC_BASE_URL=$url" \
+    "MCP_PUBLIC_BASE_URL=$url"
+
+  info "Configuración de Cloudflare Tunnel generada en $config"
+  info "URL pública persistente: $url"
+  PUBLIC_URL_RESULT="$url"
+}
+
 configure_direct() {
   local port="$1" ip default_url entered normalized open_choice
   ip="$(detect_public_ip || true)"
@@ -513,8 +590,8 @@ configure_tool_access() {
   line
   echo 'Este perfil decide qué herramientas verá ChatGPT. No cambia los permisos del usuario del sistema.'
   echo
-  echo '  1) SÓLO LECTURA Y OBSERVACIÓN'
-  echo '     Archivos, estado del sistema, Git/tmux de consulta, red y capturas de pantalla.'
+  echo '  1) SÓLO LECTURA / OBSERVACIÓN BÁSICA'
+  echo '     Archivos, estado del sistema, Git/tmux de consulta, red y pantalla.'
   echo '     No permite escribir, ejecutar comandos ni controlar teclado/mouse.'
   echo
   echo '  2) DESARROLLO (RECOMENDADO)'
@@ -530,6 +607,12 @@ configure_tool_access() {
   echo
   echo '  5) PERSONALIZADO'
   echo '     Elegís grupos y podés bloquear herramientas individuales.'
+  echo
+  echo '  6) OBSERVACIÓN ESTRICTA (Sin red ni capturas sensibles)'
+  echo '     Inspección de archivos y estado del sistema. Sin red externa ni capturas de escritorio.'
+  echo
+  echo '  7) TRABAJO RESTRINGIDO'
+  echo '     Lectura/escritura en rutas acotadas, comandos confinados y sin red externa no autorizada.'
   echo
   choice="$(prompt_choice MCP_SETUP_PROFILE_CHOICE 'Perfil de herramientas' '2')"
   case "$choice" in
@@ -554,18 +637,42 @@ if(unknown.length){console.error(`Grupos desconocidos: ${unknown.join(', ')}`);p
 if(!parseCsv(process.argv[2]).length){console.error('Elegí al menos un grupo.');process.exit(1)}
 NODE
       ;;
+    6|observacion|observación|observation) profile='observacion'; groups='' ;;
+    7|trabajo_restringido|restringido|restricted) profile='trabajo_restringido'; groups='' ;;
     *) err "Perfil no válido: $choice"; exit 2 ;;
   esac
 
   denylist="$(prompt_text MCP_SETUP_TOOL_DENYLIST 'Herramientas individuales a bloquear (opcional, separadas por coma)' "$(read_env MCP_TOOL_DENYLIST)")"
+  approvals_list="$(prompt_text MCP_SETUP_TOOL_APPROVALS 'Herramientas que requieren aprobación humana previa (opcional, separadas por coma)' "$(read_env MCP_TOOL_APPROVALS)")"
   set_env \
     "MCP_ACCESS_PROFILE=$profile" \
     "MCP_ACCESS_GROUPS=$groups" \
     'MCP_TOOL_ALLOWLIST=' \
-    "MCP_TOOL_DENYLIST=$denylist"
+    "MCP_TOOL_DENYLIST=$denylist" \
+    "MCP_TOOL_APPROVALS=$approvals_list"
+
+  node - "$profile" "$groups" "$denylist" "$approvals_list" <<'NODE'
+const { createAccessPolicy, TOOL_REQUIREMENTS } = require('./lib/access-policy');
+const { ApprovalsManager } = require('./lib/approvals');
+const p=process.argv[2], g=process.argv[3], d=process.argv[4], a=process.argv[5];
+const policy = createAccessPolicy({ MCP_ACCESS_PROFILE: p, MCP_ACCESS_GROUPS: g, MCP_TOOL_DENYLIST: d, MCP_TOOL_APPROVALS: a }, Object.keys(TOOL_REQUIREMENTS));
+const app = new ApprovalsManager();
+const s = policy.summary();
+const approvalCount = s.allowedTools.filter(t => app.isCriticalTool(t, {}, { MCP_TOOL_APPROVALS: a })).length;
+console.log(`\n[VISTA PREVIA] Perfil: ${s.label}`);
+console.log(`  Herramientas habilitadas: ${s.allowedToolCount} (requieren aprobación previa: ${approvalCount}) | Bloqueadas: ${s.blockedToolCount}`);
+if (s.warnings.length) console.log(`  Avisos de seguridad: ${s.warnings.join(' | ')}`);
+NODE
 
   case "$profile" in
+    observacion)
+      set_env 'MCP_DESKTOP_ENABLED=0' 'MCP_INPUT_ENABLED=0'
+      ;;
+    trabajo_restringido)
+      set_env 'MCP_DESKTOP_ENABLED=0' 'MCP_INPUT_ENABLED=0' 'MCP_IPC_ENABLED=1' 'MCP_REQUIRE_IPC=1'
+      ;;
     read_only|developer)
+
       set_env 'MCP_DESKTOP_ENABLED=1' 'MCP_INPUT_ENABLED=0'
       ;;
     administrator|full)
@@ -714,13 +821,16 @@ main() {
   echo '  1) NGROK (RECOMENDADO: HTTPS, funciona con CGNAT/IP dinámica y no abre el router)'
   echo '  2) IP pública o URL propia (requiere red, firewall y TLS bajo tu control)'
   echo '  3) Sólo local (ChatGPT Web no podrá conectarse)'
+  echo '  4) CLOUDFLARE TUNNEL (Túnel Zero Trust con dominio propio, supervisado, sin abrir puertos)'
   exposure="$(prompt_choice MCP_SETUP_MODE_CHOICE 'Opción de publicación' '1')"
   case "$exposure" in
     1|ngrok|NGROK) exposure='ngrok'; configure_ngrok "$port" ;;
     2|direct|DIRECT) exposure='direct'; configure_direct "$port" ;;
     3|local|LOCAL) exposure='local'; configure_local "$port" ;;
+    4|cloudflare|CLOUDFLARE) exposure='cloudflare'; configure_cloudflare "$port" ;;
     *) err "Opción de publicación no válida: $exposure"; exit 2 ;;
   esac
+
 
   configure_auth "$exposure" "$PUBLIC_URL_RESULT"
   set_env \

@@ -58,9 +58,18 @@ Uso: ./mcpctl.sh COMANDO
   oauth-status    Estado de la cuenta y sesiones OAuth
   oauth-reset     Revoca sesiones OAuth activas
   oauth-reset-all Revoca sesiones y elimina clientes OAuth registrados
+  pause           Pone al servidor MCP en pausa administrativa
+  resume          Reanuda el servidor MCP de la pausa administrativa
+  pending         Lista solicitudes de aprobación humana pendientes
+  approve <id>    Aprueba una solicitud de acción crítica pendiente (admite --resume)
+  reject <id>     Rechaza una solicitud de acción crítica pendiente
+  mfa             Estado y enrolamiento de autenticación multifactor (WebAuthn/TOTP)
+  revoke <id>     Revoca todas las sesiones y tokens de un cliente OAuth
+  diagnose        Diagnóstico de políticas, aislamiento de SO y seguridad
   doctor          Diagnóstico técnico; devuelve error si no está listo
   uninstall       Elimina sólo el servicio; conserva repo y configuración
 HELP
+
 }
 
 COMMAND="${1:-status}"
@@ -202,9 +211,34 @@ case "$COMMAND" in
   oauth-reset-all)
     node oauth-admin.js reset-all
     ;;
+  pause)
+    node mcpctl-admin.js pause "${@:2}"
+    ;;
+  resume)
+    node mcpctl-admin.js resume "${@:2}"
+    ;;
+  pending|approvals)
+    node mcpctl-admin.js pending "${@:2}"
+    ;;
+  approve)
+    node mcpctl-admin.js approve "${@:2}"
+    ;;
+  reject)
+    node mcpctl-admin.js reject "${@:2}"
+    ;;
+  mfa)
+    node mcpctl-admin.js mfa "${@:2}"
+    ;;
+  revoke)
+    node mcpctl-admin.js revoke "${@:2}"
+    ;;
+  diagnose)
+    node mcpctl-admin.js diagnose "${@:2}"
+    ;;
   doctor)
     node lib/runtime-diagnostics.js doctor
     ;;
+
   uninstall)
     if service_exists; then
       root_run systemctl disable --now "$SERVICE" 2>/dev/null || true

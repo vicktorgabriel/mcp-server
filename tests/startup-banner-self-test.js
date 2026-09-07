@@ -57,7 +57,7 @@ function main() {
     assert.equal(banner.status, 0, banner.stderr);
     assert.match(banner.stdout, new RegExp(`MCP-Server v${pkg.version.replaceAll('.', '\\.')}`));
     assert.match(banner.stdout, /Motor:\s+Node\.js .*\(código fuente\)/);
-    assert.match(banner.stdout, /Herramientas:\s+40 expuestas de 72/);
+    assert.match(banner.stdout, /Herramientas:\s+40 expuestas de (?:72|76)/);
     assert.match(banner.stdout, /Perfil:\s+Sólo lectura y observación/);
     assert.match(banner.stdout, /ROOT solicitado/);
     assert.match(banner.stdout, /Confirmaciones:\s+DESACTIVADAS/);

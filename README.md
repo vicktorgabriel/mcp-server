@@ -127,6 +127,47 @@ npm audit --audit-level=low
 El informe de esta corrección está en
 [`docs/OAUTH_DIAGNOSTICO.md`](docs/OAUTH_DIAGNOSTICO.md).
 
+## Arquitectura Gateway / Ejecutor sobre IPC
+
+Para garantizar el principio de mínimo privilegio y una separación clara de responsabilidades, el servidor implementa un modelo de dos procesos comunicados mediante IPC local:
+
+```text
+[ Cliente / ChatGPT ]
+        │  (HTTP/SSE/stdio + OAuth 2.1)
+        ▼
+[ Gateway MCP sin privilegios ] (mcp-server.js)
+        │
+        │  Socket Unix protegido (.runtime/ipc/mcp.sock - modo 0700)
+        │  Enmarcado binario 4-byte BE (límite 16MB) + Request IDs
+        │  Tiempos de espera, cancelación y contrapresión
+        ▼
+[ Ejecutor Seguro de Herramientas ] (lib/ipc-executor.js)
+        │
+        ├─► Validación estricta de política efectiva y cliente autenticado (lib/access-policy.js)
+        ├─► Verificación de aprobaciones humanas anti-tamper (lib/approvals.js)
+        ├─► Confinamiento sandbox y defensas SSRF/path (lib/sandbox.js)
+        └─► Gestión de trabajos asíncronos y procesos (lib/job-manager.js)
+```
+
+- **Validación determinista:** El Ejecutor evalúa por llamada la política efectiva, la identidad autenticada y el alcance. No confía en parámetros `"authorized": true` ni asunciones enviadas por el cliente o capas intermedias.
+- **Frontera de seguridad y máquinas virtuales:** Dos procesos que comparten el mismo UID de usuario no constituyen una barrera de aislamiento del SO. Si el host no soporta aislamiento real, los perfiles restringidos fallan de forma cerrada (`fail-closed`). Para mitigar código o modelos hostiles, se recomienda correr el ejecutor con un usuario dedicado sin acceso a Docker/sudo ni sesión gráfica, o aislarlo en una **Máquina Virtual (VM)** dedicada.
+- **Trazabilidad completa:** Cada invocación registra la cadena `Cliente -> Autenticación -> Política -> Ejecutor -> Resultado`, midiendo con precisión milimétrica latencias individuales (`t_auth_ms`, `t_policy_ms`, `t_executor_ms`), bytes transmitidos y request ID.
+
+## Trabajos Asíncronos, Vistas Previas y Sandbox
+
+- **Control de procesos asíncronos (`lib/job-manager.js`):** Soporta comandos de larga duración (`job_start`, `job_status`, `job_output`, `job_cancel`) con aislamiento por `clientId`, paginación de salida (`bytesRead`), buffers acotados y terminación de todo el árbol de procesos mediante grupos de procesos (`SIGTERM` + `SIGKILL`).
+- **Parada de emergencia y pausa:** Permite suspender la admisión de nuevas acciones y forzar la detención inmediata de tareas en curso.
+- **Defensas del Sandbox (`lib/sandbox.js`):**
+  - **Aislamiento con Bubblewrap (`bwrap`):** En perfil `trabajo_restringido`, los comandos se ejecutan con `bwrap` con sistema de archivos montado de sólo lectura (`--ro-bind`) excepto las raíces autorizadas (`--bind`), red deshabilitada (`--unshare-net`), namespace PID aislado (`--unshare-pid`) y protección de archivos de control del servidor (`.env`, `.runtime`, `.private`, tokens y código del servidor).
+  - **Límites de recursos (CPU, Memoria, Tareas/Procesos):** Motor dual para restringir consumo:
+    1. **cgroups v2 / systemd scopes:** (`systemd-run --user --scope`) limitando `MemoryMax`, `CPUQuota` y `TasksMax`.
+    2. **prlimit:** (`--as`, `--nproc`, `--cpu`) para contención en entornos unprivileged sin cgroups v2.
+    - Soporta modo estricto fail-closed (`MCP_REQUIRE_RESOURCE_LIMITS=1`).
+    - Guía detallada y plantillas en [`docs/RESOURCE_LIMITS_CGROUPS.md`](docs/RESOURCE_LIMITS_CGROUPS.md).
+  - **Path traversal:** Resolución con `fs.realpathSync` para impedir escapes mediante symlinks.
+  - **Zip-Slip:** Bloqueo de rutas relativas maliciosas en archivos comprimidos TAR/ZIP.
+  - **Egress SSRF:** Bloqueo determinista de direcciones IPv4 privadas (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), IPv6 privadas/link-local (fc00::/7, fe80::/10), loopback (`127.0.0.1`, `::1`) y la IP de metadatos (`169.254.169.254`).
+
 ## Perfiles de acceso
 
 El asistente separa cuatro decisiones diferentes:
@@ -138,7 +179,9 @@ El asistente separa cuatro decisiones diferentes:
 
 | Perfil | Herramientas visibles | Uso recomendado |
 |---|---:|---|
-| `read_only` | 40 | Auditorías, lectura de archivos, estado del sistema, Git/tmux de consulta, red y capturas de pantalla. |
+| `observacion` | 35 | Auditorías y lectura de archivos/sistema sin red ni capturas de pantalla/cámara/audio por defecto. |
+| `trabajo_restringido` | 48 | Tareas acotadas de desarrollo en carpetas explícitas, sin red externa ni herramientas de administración del sistema. |
+| `read_only` | 40 | Perfil clásico de sólo lectura: archivos, estado del sistema, Git/tmux de consulta, red y capturas. |
 | `developer` | 56 | Desarrollo cotidiano: archivos, comandos, Git, tmux, descargas y Compose. Es el valor predeterminado. |
 | `administrator` | 71 | Administración del equipo: servicios, procesos, paquetes, firewall, montajes, teclado/mouse, cámara y audio. |
 | `full` | 72 | Todo lo anterior más la herramienta dedicada de reinicio/apagado. |
@@ -152,7 +195,7 @@ Podés consultar la política activa desde ChatGPT con `tool_policy_status` o lo
 ./mcpctl.sh status
 ```
 
-> **Límite importante:** los perfiles son una barrera de herramientas, no una máquina virtual. `run_command`, control de teclado, tmux y algunas operaciones Git/Compose son capacidades amplias. Para una separación estricta, elegí `read_only` o un perfil `custom` sin `command_execution`, ejecutá el MCP con un usuario dedicado y restringí `ALLOWED_PATHS`.
+> **Límite importante:** los perfiles son una barrera de herramientas, no una máquina virtual. `run_command`, control de teclado, tmux y algunas operaciones Git/Compose son capacidades amplias. Para una separación estricta, elegí `observacion`, `trabajo_restringido` o un perfil `custom` sin `command_execution`, ejecutá el MCP con un usuario dedicado y restringí `ALLOWED_PATHS`.
 
 ### Usuario normal o root
 
@@ -162,11 +205,22 @@ El asistente también permite elegir **root**. Para habilitarlo exige escribir e
 
 Un MCP root puede leer secretos del sistema, instalar software, cambiar servicios, firewall y discos, o inutilizar el equipo. Para un servicio público persistente, el instalador exige OAuth sobre HTTPS por defecto.
 
-### Confirmaciones críticas
+### Confirmaciones críticas y Aprobaciones Fuera de Banda (Anti-Tamper)
 
-Por defecto, las herramientas dedicadas de mayor riesgo exigen frases como `DELETE`, `APPLY PACKAGES`, `APPLY FIREWALL`, `APPLY MOUNT`, `APPLY CONTAINERS`, `REBOOT` o `POWEROFF`. El usuario puede desactivar esta capa escribiendo exactamente `ACEPTO SIN CONFIRMACIONES`.
+1. **Confirmaciones en línea (Legacy):**
+   Por defecto, herramientas de mayor riesgo admiten frases como `DELETE`, `APPLY PACKAGES`, etc. Sin embargo, dado que estas frases pueden ser generadas directamente por un modelo LLM o mediante inyecciones de prompt, **no representan un consentimiento humano real**.
 
-Al desactivarla, las herramientas dejan de exigir esos campos y pueden actuar en una sola llamada. Esto **no** elimina los permisos del sistema, OAuth ni las restricciones de carpetas. Tampoco controla las confirmaciones que la propia interfaz de ChatGPT pueda mostrar: el servidor conserva metadatos honestos sobre las operaciones destructivas.
+2. **Aprobaciones Fuera de Banda (Reales / Anti-Tamper):**
+   Para operaciones que requieren intervención humana genuina, el servidor implementa un gestor criptográfico de aprobaciones (`lib/approvals.js`):
+   - Cada solicitud sensible genera un ticket pendiente enlazado a: `clientId` + `herramienta` + `hash canónico SHA-256 de los argumentos exactos` + `versión de política`.
+   - El modelo **no** puede auto-aprobarse ni alterar la política.
+   - La aprobación o rechazo se realiza exclusivamente desde la terminal local autenticada:
+     ```bash
+     ./mcpctl.sh pending              # Listar solicitudes pendientes
+     ./mcpctl.sh approve <ticket-id>  # Aprobar ejecución (uso único atómico)
+     ./mcpctl.sh reject <ticket-id>   # Rechazar solicitud
+     ```
+   - Cada ticket aprobado se consume de forma atómica y unívoca en `.runtime/approvals.json` con candado concurrente (`.lock`), impidiendo ataques de repetición (replay) o modificación de argumentos.
 
 Para cambiar el perfil, la cuenta de ejecución o las confirmaciones sin volver a ingresar ngrok ni OAuth:
 
@@ -244,6 +298,14 @@ Una dirección HTTP con IP puede servir para pruebas con clientes compatibles, p
 
 Escucha únicamente en `127.0.0.1`. Sirve para clientes instalados en la misma computadora mediante HTTP o `stdio`, pero ChatGPT Web no puede conectarse directamente a un servidor local.
 
+### Opción 4: Cloudflare Tunnel (cloudflared)
+
+Cloudflare Tunnel permite exponer el servidor MCP sobre HTTPS con un hostname propio y estable sin abrir puertos ni depender de reenvíos NAT:
+- El supervisor gestiona el proceso `cloudflared` apuntando únicamente al origen loopback `http://127.0.0.1:3000`.
+- Los secretos del túnel se almacenan protegidos en `.private/`.
+- Soporta streaming HTTP y eventos Server-Sent Events (SSE) del protocolo MCP.
+- Guía de endurecimiento, mitigación de abusos y configuración WAF documentada en [`docs/CLOUDFLARE_WAF.md`](docs/CLOUDFLARE_WAF.md) (reglas de rate limiting, no-cache para `/mcp` y `/oauth`, y omisión de desafíos CAPTCHA interactivos en llamadas de máquinas).
+
 ## Autenticación
 
 ### Compatibilidad actual de ChatGPT (4.5.3)
@@ -310,6 +372,25 @@ Comandos de administración:
 ```
 
 `oauth-reset` revoca las sesiones. `oauth-reset-all` también elimina los clientes registrados, por lo que ChatGPT deberá registrarse y autorizarse nuevamente.
+
+### Autenticación Multifactor (MFA) y Revocación
+
+El servidor implementa autenticación multifactor (`lib/mfa.js`) para proteger el inicio de sesión OAuth y las operaciones administrativas sensibles:
+- **WebAuthn / Passkeys / FIDO2:** método preferido con verificación de usuario criptográfica (basado en `@simplewebauthn`), validación estricta de RP ID y Origin HTTPS, y protección contra suplantación (phishing).
+- **TOTP (RFC 6238):** compatible con Google Authenticator / Aegis / Bitwarden, con tolerancia de deriva temporal de ±1 intervalo, protección contra repetición de códigos y bloqueo automático tras 5 intentos fallidos consecutivos.
+- **Recuperación segura:** códigos de emergencia de un solo uso generados localmente y almacenados únicamente como hashes criptográficos SHA-256 en `.private/mfa-state.json` (modo `0600`).
+- **Cero fugas:** ni las semillas ni los códigos se exponen en logs ni respuestas del protocolo MCP.
+- **Revocación por cliente:** permite desautorizar inmediatamente un cliente específico sin afectar al resto:
+  ```bash
+  ./mcpctl.sh revoke <clientId>
+  ```
+- **Gestión local de MFA:**
+  ```bash
+  ./mcpctl.sh mfa status    # Verificar estado de MFA
+  ./mcpctl.sh mfa enroll    # Enrolar WebAuthn o TOTP
+  ./mcpctl.sh mfa reset     # Restablecer MFA (requiere acceso a la máquina local)
+  ```
+> **Nota de seguridad:** MFA refuerza el flujo de autenticación inicial y el consentimiento OAuth; no sustituye el cifrado en tránsito HTTPS ni revoca de inmediato un bearer token robado si no se ejecuta una revocación explícita.
 
 ### Token Bearer
 
@@ -413,10 +494,18 @@ Sólo agregues servidores que controles y revisá las herramientas antes de habi
 ./mcpctl.sh status          # Estado resumido
 ./mcpctl.sh url             # URL exacta para ChatGPT
 ./mcpctl.sh chatgpt         # Guía de conexión
-./mcpctl.sh configure       # Reconfigurar carpetas, perfil, ngrok y autenticación
+./mcpctl.sh configure       # Reconfigurar carpetas, perfil, exposición y autenticación
 ./mcpctl.sh permissions     # Mostrar perfil y herramientas permitidas/bloqueadas
 ./mcpctl.sh permissions --tools  # Mostrar las listas completas
 ./mcpctl.sh permissions-set # Cambiar perfil, root y confirmaciones sin tocar ngrok/OAuth
+./mcpctl.sh pending         # Ver solicitudes de aprobación pendientes
+./mcpctl.sh approve <id>    # Aprobar una operación sensible fuera de banda
+./mcpctl.sh reject <id>     # Rechazar una solicitud de aprobación
+./mcpctl.sh mfa status      # Consultar estado de autenticación multifactor
+./mcpctl.sh mfa enroll      # Enrolar WebAuthn o TOTP
+./mcpctl.sh mfa reset       # Restablecer MFA (desde la consola local)
+./mcpctl.sh revoke <id>     # Revocar sesiones activas de un cliente OAuth
+./mcpctl.sh diagnose        # Diagnóstico de permisos y capacidades del entorno
 ./mcpctl.sh update-check    # Comprobar ahora si hay una versión nueva
 ./mcpctl.sh temporary       # Iniciar en primer plano
 ./mcpctl.sh persistent      # Instalar/iniciar servicio persistente
@@ -585,11 +674,20 @@ Volvé a la terminal donde está corriendo, presioná `Ctrl+C` y después ejecut
 ## Pruebas
 
 ```bash
-npm test
-npm run selftest
+npm test          # Suite completa: comprobaciones estáticas + 17 suites de pruebas
+npm run selftest  # Validación integral con entorno aislado
 ```
 
-Las pruebas incluyen sintaxis, panel de inicio y caché de actualización, los cinco perfiles de acceso, modos usuario/root, confirmaciones activas o desactivadas, filtrado y rechazo directo de herramientas, las 72 herramientas, seguridad de rutas y archivos comprimidos, descargas/HTTP, operaciones administrativas en `dryRun`, modos de autenticación, flujo OAuth completo, CIMD de ChatGPT, DCR, `private_key_jwt` RS256/JWKS, logs seguros del token exchange, alertas de riesgo, PKCE, audiencia del recurso, rotación y detección de reutilización de refresh tokens, migración desde versiones anteriores, configuración inicial con ngrok simulado, unidad systemd, supervisor, propiedad de archivos privados y logs legibles.
+Comandos específicos de las nuevas suites de seguridad:
+```bash
+npm run test:ipc        # Protocolo IPC binario, framing, esquema, socket Unix y backpressure
+npm run test:approvals  # Aprobaciones fuera de banda, hash canónico SHA-256 y anti-replay
+npm run test:sandbox    # Path traversal, symlinks realpath, zip-slip y bloqueo SSRF
+npm run test:mfa        # WebAuthn (FIDO2/passkeys), TOTP, códigos hasheados y rate limiting
+npm run test:jobs       # Trabajos asíncronos, buffers acotados, árbol de procesos y pausa
+```
+
+Las pruebas cubren sintaxis, panel de inicio y caché de actualización, perfiles de acceso (incluyendo `observacion` y `trabajo_restringido`), modos usuario/root, confirmaciones activas o desactivadas, filtrado y rechazo directo de herramientas, las 72 herramientas, seguridad de rutas y archivos comprimidos, descargas/HTTP, operaciones administrativas en `dryRun`, modos de autenticación, flujo OAuth completo, CIMD de ChatGPT, DCR, `private_key_jwt` RS256/JWKS, logs seguros del token exchange, alertas de riesgo, PKCE, audiencia del recurso, rotación y detección de reutilización de refresh tokens, migración desde versiones anteriores, configuración inicial con ngrok simulado, unidad systemd, supervisor, propiedad de archivos privados y logs legibles.
 
 ## Licencia
 

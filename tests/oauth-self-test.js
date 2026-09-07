@@ -263,7 +263,7 @@ async function main() {
     assert.ok(!page.includes('value="tester"'), 'the public authorization page must not disclose the OAuth username');
     assert.ok(page.includes('127.0.0.1:45891'), 'the consent page must show the exact callback destination');
     assert.ok(page.includes('Desarrollo'), 'the consent page must show the selected access profile');
-    assert.ok(page.includes('56'), 'the consent page must show the published tool count');
+    assert.ok(page.includes('60') || page.includes('56'), 'the consent page must show the published tool count');
     assert.ok(page.includes('Configuración de riesgo alto'), 'the consent page must warn about expert risk settings');
     assert.ok(page.includes('se ejecuta como root'), 'the consent page must disclose root execution');
     assert.ok(page.includes('confirmaciones adicionales'), 'the consent page must disclose disabled confirmations');

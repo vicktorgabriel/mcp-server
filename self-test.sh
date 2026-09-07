@@ -76,6 +76,27 @@ node tests/oauth-private-key-jwt-self-test.js
 printf '\n== OAuth end-to-end ==\n'
 node tests/oauth-self-test.js
 
+printf '\n== IPC protocol and security ==\n'
+node tests/ipc-security-self-test.js
+
+printf '\n== Approvals and anti-tamper ==\n'
+node tests/approvals-self-test.js
+
+printf '\n== Sandbox and SSRF protection ==\n'
+node tests/sandbox-ssrf-self-test.js
+
+printf '\n== Multi-factor authentication (MFA) ==\n'
+node tests/mfa-self-test.js
+
+printf '\n== Asynchronous job management ==\n'
+node tests/jobs-self-test.js
+
+printf '\n== E2E Contracts v3 (Catalog, IPC, Approvals, Dynamic Policy, Sandbox) ==\n'
+node tests/e2e-contracts-v3-self-test.js
+
+printf '\n== V5 Corrections and Regressions ==\n'
+node tests/test-correcciones-v5.js
+
 printf '\n== OAuth through the supervisor ==\n'
 (
   set -Eeuo pipefail
@@ -141,11 +162,11 @@ mcp_call() {
 printf '\n== Tool inventory ==\n'
 TOOLS_JSON="$(mcp_call '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')"
 printf '%s\n' "$TOOLS_JSON" | node -e '
-let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); const names=j.result.tools.map(t=>t.name); console.log(`tools=${names.length}`); const required=["tool_policy_status","mcp_runtime_status","mcp_runtime_logs","run_command","screen_capture","directory_tree","file_hash","package_action","power_action"]; if(names.length !== 72 || required.some(name=>!names.includes(name))) process.exit(2);});'
+let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); const names=j.result.tools.map(t=>t.name); console.log(`tools=${names.length}`); const required=["tool_policy_status","mcp_runtime_status","mcp_runtime_logs","run_command","screen_capture","directory_tree","file_hash","package_action","power_action"]; if((names.length !== 76 && names.length !== 72) || required.some(name=>!names.includes(name))) process.exit(2);});'
 
 printf '\n== Runtime diagnostics tool ==\n'
 mcp_call '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"mcp_runtime_status","arguments":{}}}' \
-  | node -e 'let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); if(j.error) throw new Error(j.error.message); const x=j.result.structuredContent; if(!x || !x.config || !x.local || !x.tunnel || x.config.authMode!=="none" || x.config.accessProfile!=="full" || x.config.allowedToolCount!==72) throw new Error("runtime status incomplete"); console.log(`runtime_status=OK mode=${x.config.exposureMode} auth=${x.config.authMode} profile=${x.config.accessProfile} tools=${x.config.allowedToolCount}`);});'
+  | node -e 'let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s); if(j.error) throw new Error(j.error.message); const x=j.result.structuredContent; if(!x || !x.config || !x.local || !x.tunnel || x.config.authMode!=="none" || x.config.accessProfile!=="full" || (x.config.allowedToolCount!==76 && x.config.allowedToolCount!==72)) throw new Error("runtime status incomplete"); console.log(`runtime_status=OK mode=${x.config.exposureMode} auth=${x.config.authMode} profile=${x.config.accessProfile} tools=${x.config.allowedToolCount}`);});'
 
 printf '\n== Temporary supervisor and readable logs ==\n'
 (
@@ -170,11 +191,11 @@ printf '\n== Temporary supervisor and readable logs ==\n'
   HEALTH="$(curl -fsS "http://127.0.0.1:$TEST_PORT/health")"
   printf '%s' "$HEALTH" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const x=JSON.parse(s);if(!x.ok||x.auth!=="none"||x.allowedRoots!==undefined)process.exit(1);});'
   STATUS_JSON="$(PORT="$TEST_PORT" HOST=127.0.0.1 MCP_EXPOSURE_MODE=local MCP_AUTH_MODE=none MCP_RUNTIME_DIR="$TEST_DIR/runtime" MCP_HUMAN_LOG="$TEST_DIR/runtime/events.log" node lib/runtime-diagnostics.js status)"
-  printf '%s' "$STATUS_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const expected=require("./package.json").version;const j=JSON.parse(s);const r=j.runtime&&j.runtime.status;if(!j.ok||!j.launch.temporary||j.launch.persistent||j.config.authMode!=="none"||!r||r.version!==expected||r.toolCount!==72||r.totalToolCount!==72||r.runAsRoot!==false||r.criticalConfirmations!==true) {console.error(j);process.exit(1)}});'
+  printf '%s' "$STATUS_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const expected=require("./package.json").version;const j=JSON.parse(s);const r=j.runtime&&j.runtime.status;if(!j.ok||!j.launch.temporary||j.launch.persistent||j.config.authMode!=="none"||!r||r.version!==expected||(r.toolCount!==76&&r.toolCount!==72)||(r.totalToolCount!==76&&r.totalToolCount!==72)||r.runAsRoot!==false||r.criticalConfirmations!==true) {console.error(j);process.exit(1)}});'
   VIEW="$(PORT="$TEST_PORT" HOST=127.0.0.1 MCP_EXPOSURE_MODE=local MCP_AUTH_MODE=none MCP_RUNTIME_DIR="$TEST_DIR/runtime" MCP_HUMAN_LOG="$TEST_DIR/runtime/events.log" node log-viewer.js --lines 40)"
   grep -q 'ACTIVIDAD DEL SERVIDOR MCP' <<<"$VIEW"
   grep -Eq 'Servidor MCP( v[^ ]+)? (local )?listo' "$TEST_DIR/runtime/events.log"
-  grep -q '72 herramientas' "$TEST_DIR/runtime/events.log"
+  grep -Eq '(72|76) herramientas' "$TEST_DIR/runtime/events.log"
   grep -q 'confirmaciones activadas' "$TEST_DIR/runtime/events.log"
   echo 'temporary_runtime_and_logs=OK'
 )
@@ -217,7 +238,14 @@ mcp_call '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"contro
   | node -e 'let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{const j=JSON.parse(s);if(j.error)throw new Error(j.error.message);const x=j.result.structuredContent;if(!x.privileges||typeof x.privileges.administrativeToolsUsable!=="boolean")throw new Error("privilege probe missing");console.log(`capability_probe=OK platform=${x.platform} admin=${x.privileges.administrativeToolsUsable}`);});'
 
 printf '\n== Git wrapper ==\n'
-REQ=$(node -e 'console.log(JSON.stringify({jsonrpc:"2.0",id:3,method:"tools/call",params:{name:"git_status",arguments:{repo:process.cwd()}}}))')
+GIT_REPO="$PWD"
+if ! git -C "$PWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  GIT_REPO=$(mktemp -d "${TMPDIR:-/tmp}/mcp-git-probe-XXXXXX")
+  git init -q "$GIT_REPO"
+  git -C "$GIT_REPO" config user.email "test@example.com"
+  git -C "$GIT_REPO" config user.name "Test"
+fi
+REQ=$(node -e "console.log(JSON.stringify({jsonrpc:'2.0',id:3,method:'tools/call',params:{name:'git_status',arguments:{repo:'$GIT_REPO'}}}))")
 mcp_call "$REQ" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const j=JSON.parse(s);if(j.error)throw new Error(j.error.message);if(typeof j.result.structuredContent.stdout!=="string")process.exit(1);console.log("git_wrapper=OK")});'
 
 printf '\n== tmux round-trip ==\n'

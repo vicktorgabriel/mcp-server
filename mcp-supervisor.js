@@ -453,13 +453,79 @@ async function checkTunnel() {
   persistStatus();
 }
 
+let cloudflareChild = null;
+let cloudflareRestartTimer = null;
+let cloudflareRestartDelayMs = 3000;
+const CLOUDFLARED_BIN = process.env.CLOUDFLARED_BIN || 'cloudflared';
+const CLOUDFLARED_CONFIG = process.env.CLOUDFLARED_CONFIG || path.join(ROOT, '.private', 'cloudflared.yml');
+
+function scheduleCloudflareRestart() {
+  if (stopping || MODE !== 'cloudflare') return;
+  const delay = Math.min(cloudflareRestartDelayMs, 30000);
+  log(`Reiniciando cloudflared en ${Math.round(delay / 1000)}s...`);
+  clearTimeout(cloudflareRestartTimer);
+  cloudflareRestartTimer = setTimeout(() => {
+    cloudflareRestartDelayMs = Math.min(cloudflareRestartDelayMs * 1.5, 60000);
+    spawnCloudflare();
+  }, delay);
+}
+
+function spawnCloudflare() {
+  if (stopping || MODE !== 'cloudflare' || cloudflareChild) return;
+  log('Iniciando túnel supervisado de Cloudflare Tunnel.');
+  if (PUBLIC_BASE_URL) setPublicUrl(PUBLIC_BASE_URL);
+
+  const args = ['tunnel', '--config', CLOUDFLARED_CONFIG, 'run'];
+  try {
+    cloudflareChild = spawn(CLOUDFLARED_BIN, args, {
+      cwd: ROOT,
+      env: process.env,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    status.tunnelPid = cloudflareChild.pid || null;
+    status.tunnelRunning = Boolean(cloudflareChild.pid);
+    persistStatus();
+
+    cloudflareChild.stdout.on('data', (chunk) => {
+      const text = redactText(chunk.toString('utf8'));
+      ngrokLog.write(`[cloudflared:stdout] ${text}`);
+    });
+
+    cloudflareChild.stderr.on('data', (chunk) => {
+      const text = redactText(chunk.toString('utf8'));
+      ngrokLog.write(`[cloudflared:stderr] ${text}`);
+    });
+
+    cloudflareChild.on('error', (err) => {
+      log(`cloudflared no pudo iniciarse: ${err.message}`, 'WARN');
+      status.tunnelRunning = false;
+      cloudflareChild = null;
+      persistStatus();
+      scheduleCloudflareRestart();
+    });
+
+    cloudflareChild.on('exit', (code, signal) => {
+      log(`cloudflared se detuvo (código ${code}, señal ${signal})`, 'WARN');
+      status.tunnelRunning = false;
+      cloudflareChild = null;
+      persistStatus();
+      scheduleCloudflareRestart();
+    });
+  } catch (err) {
+    log(`Excepción al iniciar cloudflared: ${err.message}`, 'WARN');
+    scheduleCloudflareRestart();
+  }
+}
+
 function configureExposure() {
-  if (MODE === 'direct') {
+  if (MODE === 'direct' || MODE === 'cloudflare') {
     if (!PUBLIC_BASE_URL) {
-      status.lastError = 'MCP_EXPOSURE_MODE=direct requiere PUBLIC_BASE_URL.';
+      status.lastError = `MCP_EXPOSURE_MODE=${MODE} requiere PUBLIC_BASE_URL.`;
       log(status.lastError, 'WARN');
     } else {
       setPublicUrl(PUBLIC_BASE_URL);
+      if (MODE === 'cloudflare') spawnCloudflare();
     }
   } else if (MODE === 'local') {
     setPublicUrl('');
@@ -476,6 +542,7 @@ function finishShutdown() {
   status.serverHealthy = false;
   status.ngrokRunning = false;
   status.ngrokApiReachable = false;
+  status.tunnelRunning = false;
   status.updatedAt = new Date().toISOString();
   try { writeAtomic(STATUS_PATH, `${JSON.stringify(status, null, 2)}\n`); } catch (_) {}
   removeFile(PID_PATH);
@@ -494,16 +561,17 @@ function shutdown(code = 0, reason = 'solicitud de detencion') {
   if (tunnelTimer) clearInterval(tunnelTimer);
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   if (ngrokRestartTimer) clearTimeout(ngrokRestartTimer);
+  if (cloudflareRestartTimer) clearTimeout(cloudflareRestartTimer);
   persistStatus();
 
-  for (const child of [ngrokChild, serverChild]) {
+  for (const child of [ngrokChild, cloudflareChild, serverChild]) {
     if (child && !childExited(child)) {
       try { child.kill('SIGTERM'); } catch (_) {}
     }
   }
 
   const waitTimer = setInterval(() => {
-    if (childExited(ngrokChild) && childExited(serverChild)) {
+    if (childExited(ngrokChild) && childExited(cloudflareChild) && childExited(serverChild)) {
       clearInterval(waitTimer);
       finishShutdown();
     }
@@ -511,13 +579,14 @@ function shutdown(code = 0, reason = 'solicitud de detencion') {
 
   shutdownTimer = setTimeout(() => {
     clearInterval(waitTimer);
-    for (const child of [ngrokChild, serverChild]) {
+    for (const child of [ngrokChild, cloudflareChild, serverChild]) {
       if (child && !childExited(child)) {
         try { child.kill('SIGKILL'); } catch (_) {}
       }
     }
     finishShutdown();
   }, 6000);
+
 }
 
 process.on('SIGTERM', () => shutdown(0, 'SIGTERM'));
