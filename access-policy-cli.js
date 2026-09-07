@@ -4,14 +4,15 @@
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
-const { createAccessPolicy, TOOL_REQUIREMENTS, GROUPS, PROFILE_LABELS, PRESETS } = require('./lib/access-policy');
+const { createAccessPolicy, TOOL_REQUIREMENTS, TOOL_CATEGORIES, TOOL_RISK, GROUPS, PROFILE_LABELS, PRESETS } = require('./lib/access-policy');
 const { parseDotEnv } = require('./lib/runtime-diagnostics');
 const { ApprovalsManager } = require('./lib/approvals');
 const { detectOsIsolationCapabilities } = require('./lib/sandbox');
+const { applyPrivateOwnership } = require('./lib/private-owner');
 
 const approvals = new ApprovalsManager();
 
-const USE_COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
+const USE_COLOR = process.stdout.isTTY && !Object.hasOwn(process.env, 'NO_COLOR');
 const C = {
   reset: USE_COLOR ? '\x1b[0m' : '',
   bold: USE_COLOR ? '\x1b[1m' : '',
@@ -86,15 +87,32 @@ const TOOL_DESCRIPTIONS = {
   http_request: { label: 'Petición HTTP saliente', desc: 'Realiza solicitudes web validadas contra SSRF.' },
   port_check: { label: 'Verificar puerto', desc: 'Comprueba si un puerto TCP está en escucha.' },
   download_file: { label: 'Descarga de archivos', desc: 'Descarga archivos HTTP validando redirecciones y SSRF.' },
-  container_compose: { label: 'Docker Compose', desc: 'Gestiona pilas de contenedores docker-compose.' }
+  container_compose: { label: 'Docker Compose', desc: 'Gestiona pilas de contenedores docker-compose.' },
+  code_search_symbols: { label: 'Búsqueda de símbolos', desc: 'Localiza funciones, clases, tipos y variables sin ejecutar código.' },
+  project_dependency_map: { label: 'Mapa de dependencias', desc: 'Analiza dependencias leyendo manifiestos directamente sin ejecutar código.' },
+  patch_preview: { label: 'Previsualizar parche', desc: 'Calcula diff unificado y hashes sha256 antes de aplicar modificaciones.' },
+  patch_apply: { label: 'Aplicar parche seguro', desc: 'Aplica modificaciones condicionadas a hash esperado con copia de respaldo automática.' },
+  file_restore_safe: { label: 'Restauración segura', desc: 'Restaura copias de seguridad propias del servidor verificando conflictos.' },
+  project_test_runner: { label: 'Ejecutor de pruebas', desc: 'Ejecuta suites de prueba autorizadas (npm, pytest, cargo) sin shell.' },
+  service_diagnostics: { label: 'Diagnóstico de servicios', desc: 'Comprueba puertos locales y servicios del host sin escaneo externo.' },
+  security_block_history: { label: 'Historial de bloqueos', desc: 'Auditoría de herramientas bloqueadas por política, denylist o falta de confirmación.' },
+  job_list_mine: { label: 'Listar mis trabajos', desc: 'Lista trabajos en segundo plano del cliente con paginación y filtros.' },
+  job_tail_output: { label: 'Seguimiento de trabajo', desc: 'Lee incrementalmente la salida de un trabajo propio con cursor offset.' }
 };
 
 function getToolMeta(name) {
   const meta = TOOL_DESCRIPTIONS[name] || {};
+  const groups = TOOL_REQUIREMENTS[name] || [];
+  const risk = (TOOL_RISK && TOOL_RISK[name]) || 'medio';
+  const categoryKey = groups[0] || 'diagnostics';
+  const category = (TOOL_CATEGORIES && TOOL_CATEGORIES[categoryKey]) || categoryKey;
   return {
+    name,
     label: meta.label || name,
     desc: meta.desc || 'Herramienta de operación en el servidor MCP.',
-    groups: TOOL_REQUIREMENTS[name] || []
+    groups,
+    category,
+    risk
   };
 }
 
@@ -104,16 +122,49 @@ function ask(rl, question) {
   });
 }
 
-function formatStatus(policy, toolName, env) {
-  const allowed = policy.isAllowed(toolName);
+function getToolStatusAndReason(policy, toolName, env, clientContext = null) {
+  const allowed = policy.isAllowed(toolName, clientContext);
+  const clientPolicy = clientContext?.clientId ? policy.clientPolicyStore.getClientPolicy(clientContext.clientId) : null;
+  const isCrit = approvals.isApprovalRequired(toolName, {}, env, clientPolicy);
+  const groups = TOOL_REQUIREMENTS[toolName] || [];
+
   if (!allowed) {
-    return `${C.red}[BLOQUEADA]${C.reset}`;
+    let reason = `El perfil "${policy.profile}" no incluye los permisos requeridos (${groups.join(', ') || 'ninguno'})`;
+    const inDenylist = policy.denylist && (typeof policy.denylist.has === 'function' ? policy.denylist.has(toolName) : Array.isArray(policy.denylist) && policy.denylist.includes(toolName));
+    const hasAllowlist = policy.allowlist && (typeof policy.allowlist.has === 'function' ? policy.allowlist.size > 0 : Array.isArray(policy.allowlist) && policy.allowlist.length > 0);
+    const inAllowlist = policy.allowlist && (typeof policy.allowlist.has === 'function' ? policy.allowlist.has(toolName) : Array.isArray(policy.allowlist) && policy.allowlist.includes(toolName));
+
+    if (inDenylist) {
+      reason = 'Bloqueada explícitamente en lista negra (denylist)';
+    } else if (hasAllowlist && !inAllowlist) {
+      reason = 'No incluida en lista de permitidas exclusivas (allowlist)';
+    } else if (clientContext && clientContext.clientId) {
+      reason = `Bloqueada para el cliente "${clientContext.clientId}" según política específica`;
+    }
+    return {
+      status: 'BLOQUEADA',
+      badge: `${C.red}[BLOQUEADA]${C.reset}`,
+      reason
+    };
   }
-  const isCrit = approvals.isCriticalTool(toolName, {}, env);
+
   if (isCrit) {
-    return `${C.yellow}[APROBACIÓN]${C.reset}`;
+    return {
+      status: 'APROBACIÓN',
+      badge: `${C.yellow}[APROBACIÓN]${C.reset}`,
+      reason: 'Requiere confirmación humana local antes de ejecutar (acción sensible/mutante)'
+    };
   }
-  return `${C.green}[PERMITIDA]${C.reset}`;
+
+  return {
+    status: 'PERMITIDA',
+    badge: `${C.green}[PERMITIDA]${C.reset}`,
+    reason: `Habilitada para ejecución directa en perfil "${policy.profile}"`
+  };
+}
+
+function formatStatus(policy, toolName, env, clientContext = null) {
+  return getToolStatusAndReason(policy, toolName, env, clientContext).badge;
 }
 
 function showSummary(env) {
@@ -145,9 +196,12 @@ function showSummary(env) {
   }
   process.stdout.write(`${C.bold}------------------------------------------------------------------------${C.reset}\n`);
   process.stdout.write(`Comandos útiles:\n`);
-  process.stdout.write(`  ./mcpctl.sh permissions --search <término>   Buscar herramientas por nombre o función\n`);
-  process.stdout.write(`  ./mcpctl.sh permissions --group <grupo>      Ver herramientas de un grupo específico\n`);
-  process.stdout.write(`  ./mcpctl.sh permissions --tools              Ver lista completa de herramientas\n`);
+  process.stdout.write(`  ./mcpctl.sh permissions --catalog            Ver catálogo completo con categorías y riesgos\n`);
+  process.stdout.write(`  ./mcpctl.sh permissions --catalog --client <id>  Ver catálogo evaluado para un cliente específico\n`);
+  process.stdout.write(`  ./mcpctl.sh permissions --catalog --json      Exportar catálogo en formato JSON\n`);
+  process.stdout.write(`  ./mcpctl.sh permissions --search <término>    Buscar herramientas por nombre o función\n`);
+  process.stdout.write(`  ./mcpctl.sh permissions --group <grupo>       Ver herramientas de un grupo específico\n`);
+  process.stdout.write(`  ./mcpctl.sh permissions --tools               Ver lista completa de herramientas\n`);
   process.stdout.write(`  ./mcpctl.sh permissions --interactive        Menú interactivo de selección\n`);
   process.stdout.write(`${C.bold}========================================================================${C.reset}\n\n`);
 }
@@ -219,6 +273,131 @@ function saveDotEnvSettings(env) {
   const tmpPath = `${envPath}.${process.pid}.tmp`;
   fs.writeFileSync(tmpPath, content, { mode: 0o600 });
   fs.renameSync(tmpPath, envPath);
+  applyPrivateOwnership(envPath, 0o600);
+}
+
+function showCatalogOutput(env, options = {}) {
+  const { clientId = null, asJson = false, search = '' } = options;
+  const clientContext = clientId ? { clientId } : null;
+  const policy = createAccessPolicy(env, Object.keys(TOOL_REQUIREMENTS));
+  const allTools = Object.keys(TOOL_REQUIREMENTS).sort();
+
+  const filtered = search
+    ? allTools.filter(name => {
+        const meta = getToolMeta(name);
+        const q = search.toLowerCase();
+        return name.toLowerCase().includes(q) ||
+          meta.label.toLowerCase().includes(q) ||
+          meta.desc.toLowerCase().includes(q) ||
+          meta.category.toLowerCase().includes(q) ||
+          meta.groups.some(g => g.toLowerCase().includes(q));
+      })
+    : allTools;
+
+  const catalog = filtered.map(name => {
+    const meta = getToolMeta(name);
+    const info = getToolStatusAndReason(policy, name, env, clientContext);
+    return {
+      name,
+      readableName: meta.label,
+      description: meta.desc,
+      category: meta.category,
+      risk: meta.risk,
+      requiredPermissions: meta.groups,
+      status: info.status,
+      badge: info.badge,
+      reason: info.reason
+    };
+  });
+
+  if (asJson) {
+    process.stdout.write(JSON.stringify({
+      catalogVersion: require('./package.json').version,
+      profile: policy.profile,
+      clientId: clientId || null,
+      totalTools: allTools.length,
+      displayedTools: catalog.length,
+      tools: catalog.map(t => ({
+        name: t.name,
+        readableName: t.readableName,
+        description: t.description,
+        category: t.category,
+        risk: t.risk,
+        requiredPermissions: t.requiredPermissions,
+        status: t.status,
+        reason: t.reason
+      }))
+    }, null, 2) + '\n');
+    return;
+  }
+
+  process.stdout.write(`\n${C.bold}========================================================================================================${C.reset}\n`);
+  process.stdout.write(` ${C.cyan}CATÁLOGO GENERAL DE HERRAMIENTAS Y POLÍTICA DE ACCESO MCP${C.reset}`);
+  if (clientId) {
+    process.stdout.write(` (Cliente: ${C.bold}${clientId}${C.reset})`);
+  }
+  process.stdout.write(`\n Perfil activo: ${C.bold}${policy.label || policy.profile}${C.reset} | Total: ${allTools.length} capacidades\n`);
+  process.stdout.write(`${C.bold}========================================================================================================${C.reset}\n\n`);
+
+  let currentCategory = '';
+  for (const item of catalog) {
+    if (item.category !== currentCategory) {
+      currentCategory = item.category;
+      process.stdout.write(`\n${C.bold}--- [ ${currentCategory.toUpperCase()} ] ---${C.reset}\n`);
+    }
+
+    const riskColor = item.risk === 'critico' ? C.red : item.risk === 'medio' ? C.yellow : C.green;
+    const riskBadge = `${riskColor}[Riesgo: ${item.risk.toUpperCase()}]${C.reset}`;
+
+    process.stdout.write(`  ${item.badge} ${C.bold}${item.readableName}${C.reset} (${C.cyan}${item.name}${C.reset}) ${riskBadge}\n`);
+    process.stdout.write(`     ${C.dim}Descripción:${C.reset} ${item.description}\n`);
+    process.stdout.write(`     ${C.dim}Permisos:${C.reset}    ${item.requiredPermissions.join(', ') || 'ninguno (acceso general)'}\n`);
+    process.stdout.write(`     ${C.dim}Motivo:${C.reset}      ${item.reason}\n\n`);
+  }
+  process.stdout.write(`${C.bold}========================================================================================================${C.reset}\n\n`);
+}
+
+async function configureClient(env, clientId, args, interactive) {
+  if (!clientId || clientId.startsWith('--') || clientId.length > 2048 || ['__proto__', 'constructor', 'prototype'].includes(clientId)) throw new Error('Identificador de cliente invalido.');
+  const policy = createAccessPolicy(env, Object.keys(TOOL_REQUIREMENTS));
+  const store = policy.clientPolicyStore;
+  const update = (action, value) => {
+    if (action === '--profile') {
+      if (!Object.hasOwn(PROFILE_LABELS, value) || value === 'custom') throw new Error('Perfil base invalido. Use un perfil predefinido y ajustes individuales.');
+    } else if (!Object.hasOwn(TOOL_REQUIREMENTS, value)) throw new Error('Herramienta desconocida.');
+    store._mutate(state => {
+      const current = state.clients[clientId] || {};
+      const denied = new Set(current.deniedTools || []), approvals = new Set(current.approvalTools || []);
+      if (action === '--deny-tool') denied.add(value);
+      if (action === '--allow-tool') { denied.delete(value); approvals.delete(value); }
+      if (action === '--require-approval') { denied.delete(value); approvals.add(value); }
+      const next = { ...current, deniedTools: [...denied], approvalTools: [...approvals], updatedAt: Date.now() };
+      if (action === '--profile') next.profile = value;
+      if ((action === '--allow-tool' || action === '--require-approval') && Array.isArray(next.allowedTools) && next.allowedTools.length && !next.allowedTools.includes(value)) next.allowedTools = [...next.allowedTools, value];
+      state.clients[clientId] = next;
+      store._setConfiguredExpected(true);
+    });
+    process.stdout.write('Politica del cliente guardada. El perfil global sigue limitando los permisos efectivos.\n');
+  };
+  if (!interactive) {
+    const actions = ['--allow-tool', '--deny-tool', '--require-approval', '--profile'].filter(a => args.includes(a));
+    if (actions.length !== 1) throw new Error('Indique exactamente una accion por comando.');
+    update(actions[0], args[args.indexOf(actions[0]) + 1]);
+    return;
+  }
+  if (!process.stdin.isTTY) throw new Error('El menu por cliente requiere una terminal interactiva.');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    for (;;) {
+      showCatalogOutput(env, { clientId });
+      const action = await ask(rl, '1. Permitir  2. Bloquear  3. Pedir aprobacion  4. Perfil  0. Salir: ');
+      if (action === '0') break;
+      const flag = { '1': '--allow-tool', '2': '--deny-tool', '3': '--require-approval', '4': '--profile' }[action];
+      if (!flag) continue;
+      const value = await ask(rl, flag === '--profile' ? 'Perfil base: ' : 'Nombre tecnico de herramienta (visible en catalogo): ');
+      try { update(flag, value.trim()); } catch (error) { process.stdout.write(error.message + '\n'); }
+    }
+  } finally { rl.close(); }
 }
 
 async function runInteractiveMenu(env) {
@@ -238,9 +417,10 @@ async function runInteractiveMenu(env) {
       process.stdout.write('  5) Cambiar perfil base (Observación, Restringido, Desarrollo, etc.)\n');
       process.stdout.write('  6) Configurar modo de herramienta individual (Permitida / Aprobación / Bloqueada)\n');
       process.stdout.write('  7) Guardar cambios de política en el archivo .env\n');
+      process.stdout.write('  8) Ver catálogo completo con categorías, riesgos y motivos\n');
       process.stdout.write('  0) Salir\n\n');
 
-      const ans = await ask(rl, 'Seleccioná una opción [0-7]: ');
+      const ans = await ask(rl, 'Seleccioná una opción [0-8]: ');
       if (ans === '0' || ans.toLowerCase() === 'q' || ans.toLowerCase() === 'salir') {
         break;
       } else if (ans === '1') {
@@ -349,6 +529,8 @@ async function runInteractiveMenu(env) {
       } else if (ans === '7') {
         saveDotEnvSettings(env);
         process.stdout.write('\n[OK] Configuración persistida exitosamente en .env.\n');
+      } else if (ans === '8') {
+        showCatalogOutput(env, {});
       }
     }
   } finally {
@@ -364,16 +546,31 @@ async function main() {
   const args = process.argv.slice(2);
   const searchIdx = args.indexOf('--search');
   const groupIdx = args.indexOf('--group');
+  const clientIdx = args.indexOf('--client');
   const isInteractive = args.includes('--interactive') || args.includes('--menu');
   const showTools = args.includes('--tools') || args.includes('--all');
+  const showCatalog = args.includes('--catalog');
+  const asJson = args.includes('--json');
+  const clientId = (clientIdx !== -1 && args[clientIdx + 1]) ? args[clientIdx + 1] : null;
+  const searchVal = (searchIdx !== -1 && args[searchIdx + 1]) ? args[searchIdx + 1] : '';
+
+  if (clientId && (isInteractive || args.includes('--allow-tool') || args.includes('--deny-tool') || args.includes('--require-approval') || args.includes('--profile'))) {
+    await configureClient(env, clientId, args, isInteractive);
+    return;
+  }
 
   if (isInteractive) {
     await runInteractiveMenu(env);
     return;
   }
 
-  if (searchIdx !== -1 && args[searchIdx + 1]) {
-    showSearchResults(env, args[searchIdx + 1]);
+  if (showCatalog || asJson) {
+    showCatalogOutput(env, { clientId, asJson, search: searchVal });
+    return;
+  }
+
+  if (searchIdx !== -1 && searchVal) {
+    showSearchResults(env, searchVal);
     return;
   }
 
@@ -385,17 +582,7 @@ async function main() {
   showSummary(env);
 
   if (showTools) {
-    const policy = createAccessPolicy(env, Object.keys(TOOL_REQUIREMENTS));
-    const allTools = Object.keys(TOOL_REQUIREMENTS).sort();
-    process.stdout.write(`\nLISTADO DETALLADO DE HERRAMIENTAS (${allTools.length}):\n\n`);
-    for (const name of allTools) {
-      const meta = getToolMeta(name);
-      const st = formatStatus(policy, name, env);
-      const sign = policy.isAllowed(name) ? '+' : '-';
-      process.stdout.write(`  ${st} ${sign} ${name} (${C.bold}${meta.label}${C.reset})\n`);
-      process.stdout.write(`     Descripción: ${meta.desc}\n`);
-    }
-    process.stdout.write('\n');
+    showCatalogOutput(env, { clientId, asJson: false });
   }
 }
 

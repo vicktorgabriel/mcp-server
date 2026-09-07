@@ -1,5 +1,7 @@
 # MCP Local Full Control
 
+> **4.6.0:** 86 herramientas registradas, diez nuevas capacidades de proyecto y seguimiento, catalogo humano por cliente, parches con hash obligatorio, restauraciones propias con deteccion de conflictos, trabajos idempotentes y trazas de comunicacion. Mantiene las correcciones de limites de recursos de la entrega anterior.
+
 > **4.5.3:** corrige el retorno OAuth desde el formulario sandboxed de ChatGPT. La CSP permite ahora únicamente el issuer y el origen del callback registrado, evitando que `form-action` bloquee el redirect después del login. También separa completamente Autorizar/Cancelar, acepta `Origin: null` sólo con Fetch Metadata de navegación segura, serializa el estado OAuth entre procesos, mejora el diagnóstico sin registrar secretos y ordena módulos, pruebas y documentación en carpetas específicas.
 
 Servidor MCP para administrar un equipo propio desde ChatGPT y otros clientes compatibles. Expone herramientas de archivos, comandos, procesos, servicios, Git, tmux, escritorio, captura de pantalla, cámara, audio y diagnóstico del sistema.
@@ -9,7 +11,7 @@ Incluye:
 - un panel de inicio con logo, versión, cantidad de herramientas, perfil, cuenta, confirmaciones y estado de actualización;
 - configuración inicial completa en **una sola terminal**;
 - perfiles de acceso que deciden qué herramientas verá ChatGPT;
-- 72 herramientas verificadas para archivos, red, paquetes, firewall, montajes, contenedores, escritorio y administración;
+- 86 herramientas verificadas para archivos, red, paquetes, firewall, montajes, contenedores, escritorio y administración;
 - ejecución opcional como `root`, siempre mediante una aceptación de riesgo explícita;
 - confirmaciones críticas opcionales para quienes necesiten automatización total;
 - comprobación de actualizaciones en segundo plano, con aviso de color cuando hay una versión nueva;
@@ -173,18 +175,18 @@ Para garantizar el principio de mínimo privilegio y una separación clara de re
 El asistente separa cuatro decisiones diferentes:
 
 - **Alcance de archivos:** únicamente las carpetas indicadas o todo lo permitido por el usuario del sistema.
-- **Perfil de herramientas:** cuáles de las 72 herramientas se anuncian a ChatGPT y cuáles se rechazan aunque un cliente intente invocarlas directamente.
+- **Perfil de herramientas:** cuáles de las 86 herramientas se anuncian a ChatGPT y cuáles se rechazan aunque un cliente intente invocarlas directamente.
 - **Cuenta de ejecución:** usuario normal o `root`. `root` puede superar las barreras de permisos del sistema.
 - **Confirmaciones críticas:** exigir o no las frases adicionales de seguridad antes de borrar, instalar paquetes, cambiar firewall/montajes, modificar contenedores o apagar el equipo.
 
 | Perfil | Herramientas visibles | Uso recomendado |
 |---|---:|---|
-| `observacion` | 35 | Auditorías y lectura de archivos/sistema sin red ni capturas de pantalla/cámara/audio por defecto. |
-| `trabajo_restringido` | 48 | Tareas acotadas de desarrollo en carpetas explícitas, sin red externa ni herramientas de administración del sistema. |
-| `read_only` | 40 | Perfil clásico de sólo lectura: archivos, estado del sistema, Git/tmux de consulta, red y capturas. |
-| `developer` | 56 | Desarrollo cotidiano: archivos, comandos, Git, tmux, descargas y Compose. Es el valor predeterminado. |
-| `administrator` | 71 | Administración del equipo: servicios, procesos, paquetes, firewall, montajes, teclado/mouse, cámara y audio. |
-| `full` | 72 | Todo lo anterior más la herramienta dedicada de reinicio/apagado. |
+| `observacion` | Segun politica efectiva | Auditorías y lectura de archivos/sistema sin red ni capturas de pantalla/cámara/audio por defecto. |
+| `trabajo_restringido` | Segun politica efectiva | Tareas acotadas de desarrollo en carpetas explícitas, sin red externa ni herramientas de administración del sistema. |
+| `read_only` | Segun politica efectiva | Perfil clásico de sólo lectura: archivos, estado del sistema, Git/tmux de consulta, red y capturas. |
+| `developer` | Segun politica efectiva | Desarrollo cotidiano: archivos, comandos, Git, tmux, descargas y Compose. Es el valor predeterminado. |
+| `administrator` | Segun politica efectiva | Administración del equipo: servicios, procesos, paquetes, firewall, montajes, teclado/mouse, cámara y audio. |
+| `full` | Segun politica efectiva | Todo lo anterior más la herramienta dedicada de reinicio/apagado. |
 | `custom` | Variable | Grupos elegidos manualmente y bloqueos por herramienta. |
 
 El perfil personalizado permite combinar grupos como `files_read`, `files_write`, `system_read`, `system_manage`, `git_read`, `git_write`, `network`, `packages`, `firewall`, `mounts`, `containers`, `desktop_view`, `desktop_control`, `camera`, `audio` y `power`. También se pueden aplicar `MCP_TOOL_ALLOWLIST` y `MCP_TOOL_DENYLIST` para filtrar nombres concretos.
@@ -536,7 +538,7 @@ Si cambian definiciones de herramientas después de crear la app en ChatGPT, pue
 
 ## Herramientas incluidas
 
-El servidor expone hasta **72 herramientas**, según el perfil seleccionado:
+El servidor expone hasta **86 herramientas**, según el perfil seleccionado:
 
 - búsqueda, lectura, escritura, parcheo, árbol de directorios, copia, movimiento, borrado y hashes;
 - creación y extracción segura de archivos TAR/ZIP;
@@ -687,8 +689,14 @@ npm run test:mfa        # WebAuthn (FIDO2/passkeys), TOTP, códigos hasheados y 
 npm run test:jobs       # Trabajos asíncronos, buffers acotados, árbol de procesos y pausa
 ```
 
-Las pruebas cubren sintaxis, panel de inicio y caché de actualización, perfiles de acceso (incluyendo `observacion` y `trabajo_restringido`), modos usuario/root, confirmaciones activas o desactivadas, filtrado y rechazo directo de herramientas, las 72 herramientas, seguridad de rutas y archivos comprimidos, descargas/HTTP, operaciones administrativas en `dryRun`, modos de autenticación, flujo OAuth completo, CIMD de ChatGPT, DCR, `private_key_jwt` RS256/JWKS, logs seguros del token exchange, alertas de riesgo, PKCE, audiencia del recurso, rotación y detección de reutilización de refresh tokens, migración desde versiones anteriores, configuración inicial con ngrok simulado, unidad systemd, supervisor, propiedad de archivos privados y logs legibles.
+Las pruebas cubren sintaxis, panel de inicio y caché de actualización, perfiles de acceso (incluyendo `observacion` y `trabajo_restringido`), modos usuario/root, confirmaciones activas o desactivadas, filtrado y rechazo directo de herramientas, las 86 herramientas, seguridad de rutas y archivos comprimidos, descargas/HTTP, operaciones administrativas en `dryRun`, modos de autenticación, flujo OAuth completo, CIMD de ChatGPT, DCR, `private_key_jwt` RS256/JWKS, logs seguros del token exchange, alertas de riesgo, PKCE, audiencia del recurso, rotación y detección de reutilización de refresh tokens, migración desde versiones anteriores, configuración inicial con ngrok simulado, unidad systemd, supervisor, propiedad de archivos privados y logs legibles.
 
 ## Licencia
 
 MIT.
+
+## Novedades y migracion a 4.6.0
+
+La version 4.6.0 agrega diez herramientas (86 en total), permisos por cliente, ediciones con hash y restauracion protegida, seguimiento de trabajos y diagnostico sin afirmar protecciones no verificadas.
+
+Consulte la [guia de herramientas, permisos y migracion](docs/TOOLS_V4_6.md) para ejemplos, limites y configuracion. Los modulos nuevos estan en `lib/tools/` y las pruebas en `tests/tools/`; los comandos de inicio existentes no cambian.

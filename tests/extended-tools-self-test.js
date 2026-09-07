@@ -130,11 +130,11 @@ async function main() {
     await waitForHealth(base);
 
     const toolList = await request('tools/list');
-    assert.ok(toolList.result.tools.length === 76 || toolList.result.tools.length === 72);
+    assert.equal(toolList.result.tools.length, 86);
 
     const policy = await call('tool_policy_status');
     assert.equal(policy.profile, 'full');
-    assert.ok(policy.allowedToolCount === 76 || policy.allowedToolCount === 72);
+    assert.equal(policy.allowedToolCount, 86);
     assert.equal(policy.blockedToolCount, 0);
 
     const tree = await call('directory_tree', { path: 'source', depth: 3 });

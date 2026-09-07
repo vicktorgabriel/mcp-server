@@ -43,6 +43,7 @@ Uso: ./mcpctl.sh COMANDO
   url             Muestra la URL activa para ChatGPT
   chatgpt         Guía paso a paso para agregarlo en ChatGPT
   configure       Reabre el asistente de ngrok, URL, acceso y autenticación
+  catalog         Catálogo legible con categorías, riesgos, estado y razones
   permissions     Muestra el perfil y las herramientas permitidas/bloqueadas
   permissions-set Cambia perfil, root y confirmaciones sin tocar ngrok/OAuth
   update-check    Comprueba ahora si el repositorio tiene una actualización
@@ -85,6 +86,9 @@ case "$COMMAND" in
     ;;
   update-check|updates|version-check)
     node startup-banner.js --check-update --force --notify
+    ;;
+  catalog|catalogo)
+    node access-policy-cli.js --catalog "${@:2}"
     ;;
   permissions|access)
     node access-policy-cli.js "${@:2}"

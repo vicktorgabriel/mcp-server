@@ -726,15 +726,18 @@ class MCPFileServer {
       allowedRoots: ALLOWED_ROOTS,
       accessPolicy: this.accessPolicy
     });
+    this.approvals = new ApprovalsManager();
+    this.jobManager = new JobManager();
     this.extendedTools = createExtendedTools({
       resolvePath,
       buildToolMetadata,
       textResult,
       allowedRoots: ALLOWED_ROOTS,
-      accessPolicy: this.accessPolicy
+      accessPolicy: this.accessPolicy,
+      jobManager: this.jobManager,
+      approvals: this.approvals
     });
     this.allTools = Object.freeze(this.getAllTools());
-    this.approvals = new ApprovalsManager();
     this.ipcGateway = null;
     const ipcSocketPath = process.env.MCP_IPC_SOCKET || process.env.MCP_IPC_SOCK || path.resolve('.runtime/ipc/mcp.sock');
     const useIpc = process.env.MCP_IPC_ENABLED === '1' || process.env.MCP_REQUIRE_IPC === '1' ||
@@ -747,7 +750,6 @@ class MCPFileServer {
         });
       } catch (_) {}
     }
-    this.jobManager = new JobManager();
   }
 
   getAllTools() {
@@ -924,7 +926,8 @@ class MCPFileServer {
             command: { type: 'string', description: 'Ejecutable.' },
             args: { type: 'array', items: { type: 'string' }, description: 'Argumentos.' },
             cwd: { type: 'string', description: 'Directorio de trabajo.' },
-            timeoutMs: { type: 'number', description: 'Tiempo límite.' }
+            timeoutMs: { type: 'number', description: 'Tiempo límite.' },
+            idempotencyKey: { type: 'string', description: 'Clave de idempotencia única para prevenir ejecuciones duplicadas simultáneas.' }
           },
           required: ['command']
         },
@@ -1015,31 +1018,35 @@ class MCPFileServer {
           const params = request.params || {};
           const toolArgs = params.arguments || {};
           const approvalId = params.approvalId || (toolArgs && (toolArgs.approvalId || toolArgs._approvalId || toolArgs.approval_id)) || context.approvalId;
-          const execContext = { ...context, approvalId };
+          const traceId = crypto.randomUUID();
+          const execContext = { ...context, approvalId, traceId };
           const started = Date.now();
           const t_auth_ms = context.t_auth_ms || 0;
           const t_policy_start = Date.now();
-          this.accessPolicy.assertAllowed(params.name, context.principal);
-          const t_policy_ms = Date.now() - t_policy_start;
-          Logger.toolStart(params.name, toolArgs, execContext);
+          let t_policy_ms = 0;
           try {
+            this.accessPolicy.assertAllowed(params.name, context.principal);
+            t_policy_ms = Date.now() - t_policy_start;
+            Logger.toolStart(params.name, toolArgs, execContext);
             const t_exec_start = Date.now();
             const result = await this.callTool(params.name, toolArgs, execContext);
             const t_executor_ms = Date.now() - t_exec_start;
             const durationMs = Date.now() - started;
             const bytesOut = Buffer.byteLength(JSON.stringify(result || {}), 'utf8');
 
-            const clientLabel = (context.principal && (context.principal.clientName || context.principal.label)) || 'cliente_local';
+            const clientLabel = 'cliente';
             const authType = (context.principal && context.principal.authMode) || (context.auth && context.auth.mode) || 'none';
             const policyProfile = (this.accessPolicy && this.accessPolicy.profile) || 'desconocida';
             const execMode = (this.ipcGateway && this.ipcGateway.connected) ? 'ipc_socket' : 'interno';
+            const approvalStage = approvalId ? `Aprobación(id=${String(approvalId).slice(0, 8)})` : 'Aprobación(n/a)';
 
-            humanEvent('FLUJO', `[req-${request.id !== undefined ? request.id : 'std'}] Cliente(${clientLabel}) -> Autenticación(${authType}) -> Política(${policyProfile}) -> Ejecutor(${execMode}) -> Resultado(ok, ${durationMs}ms, ${bytesOut}B)`);
+            humanEvent('FLUJO', `[${traceId}] Cliente(${clientLabel}) -> Servidor(mcp) -> ${approvalStage} -> Ejecutor(${execMode}) -> Resultado(ok, ${durationMs}ms, ${bytesOut}B)`);
 
             Logger.activity({
               method: 'tools/call',
               requestId: request.id,
-              flow: `${clientLabel} -> ${authType} -> ${policyProfile} -> ${execMode} -> ok`,
+              traceId,
+              flow: `${clientLabel} -> Servidor -> ${approvalStage} -> ${execMode} -> ok`,
               tool: params.name,
               args: summarizeToolArgs(params.name, toolArgs),
               actor: context.principal && context.principal.label || '',
@@ -1054,20 +1061,23 @@ class MCPFileServer {
               ok: true
             });
             Logger.toolSuccess(params.name, result, durationMs);
+            result._meta = { ...(result._meta || {}), traceId, durationMs, executor: execMode };
             return createResponse(request.id, result);
           } catch (error) {
             const durationMs = Date.now() - started;
-            const clientLabel = (context.principal && (context.principal.clientName || context.principal.label)) || 'cliente_local';
+            const clientLabel = 'cliente';
             const authType = (context.principal && context.principal.authMode) || (context.auth && context.auth.mode) || 'none';
             const policyProfile = (this.accessPolicy && this.accessPolicy.profile) || 'desconocida';
             const execMode = (this.ipcGateway && this.ipcGateway.connected) ? 'ipc_socket' : 'interno';
+            const approvalStage = approvalId ? `Aprobación(id=${String(approvalId).slice(0, 8)})` : (error.isApprovalRequired ? `Aprobación(pendiente=${String(error.approvalId).slice(0, 8)})` : 'Aprobación(n/a)');
 
-            humanEvent('FLUJO', `[req-${request.id !== undefined ? request.id : 'std'}] Cliente(${clientLabel}) -> Autenticación(${authType}) -> Política(${policyProfile}) -> Ejecutor(${execMode}) -> Resultado(error: ${error.message}, ${durationMs}ms)`);
+            humanEvent('FLUJO', `[${traceId}] Cliente(${clientLabel}) -> Servidor(mcp) -> ${approvalStage} -> Ejecutor(${execMode}) -> Resultado(error, ${durationMs}ms)`);
 
             Logger.activity({
               method: 'tools/call',
               requestId: request.id,
-              flow: `${clientLabel} -> ${authType} -> ${policyProfile} -> ${execMode} -> error`,
+              traceId,
+              flow: `${clientLabel} -> Servidor -> ${approvalStage} -> ${execMode} -> error`,
               tool: params.name,
               args: summarizeToolArgs(params.name, toolArgs),
               actor: context.principal && context.principal.label || '',
@@ -1218,7 +1228,8 @@ class MCPFileServer {
           command: effectiveCmd,
           args: effectiveArgs,
           cwd,
-          timeoutMs: args.timeoutMs
+          timeoutMs: args.timeoutMs,
+          idempotencyKey: args.idempotencyKey
         }));
       }
       case 'job_status':

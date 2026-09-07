@@ -30,10 +30,10 @@ function freePort() {
 }
 
 // --------------------------------------------------------------------------
-// TEST 1: Catalog consistency across 76 tools & schemas
+// TEST 1: Catalog consistency across 86 tools & schemas
 // --------------------------------------------------------------------------
 async function testCatalogAndSchemas() {
-  process.stdout.write('[TEST 1] Verifying 76 tools catalog and schema compatibility...\n');
+  process.stdout.write('[TEST 1] Verifying 86 tools catalog and schema compatibility...\n');
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-e2e-catalog-'));
 
   try {
@@ -44,11 +44,16 @@ async function testCatalogAndSchemas() {
     const serverTools = server.getAllTools();
     const executorTools = executor.getAllTools();
 
-    assert.equal(serverTools.length, 76, `Server must publish exactly 76 tools (got ${serverTools.length})`);
-    assert.equal(executorTools.length, 76, `Executor must publish exactly 76 tools (got ${executorTools.length})`);
+    assert.equal(serverTools.length, 86, `Server must publish exactly 86 tools (got ${serverTools.length})`);
+    assert.equal(executorTools.length, 86, `Executor must publish exactly 86 tools (got ${executorTools.length})`);
 
     const serverToolMap = new Map(serverTools.map(t => [t.name, t]));
     const executorToolMap = new Map(executorTools.map(t => [t.name, t]));
+    assert.equal(serverToolMap.size, 86, 'Server tool names must be unique');
+    assert.equal(executorToolMap.size, 86, 'Executor tool names must be unique');
+    for (const name of ['code_search_symbols', 'project_dependency_map', 'patch_preview', 'patch_apply', 'file_restore_safe', 'project_test_runner', 'service_diagnostics', 'security_block_history', 'job_list_mine', 'job_tail_output']) {
+      assert.ok(serverToolMap.has(name), `Missing new tool: ${name}`);
+    }
 
     for (const [name, sTool] of serverToolMap) {
       const eTool = executorToolMap.get(name);
@@ -70,7 +75,7 @@ async function testCatalogAndSchemas() {
       assert.deepStrictEqual(sProps, eProps, `Properties mismatch for tool '${name}': server=${JSON.stringify(sProps)} vs exec=${JSON.stringify(eProps)}`);
     }
 
-    process.stdout.write('  -> 76 tools schemas match 100%.\n');
+    process.stdout.write('  -> 86 tools schemas match 100%.\n');
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

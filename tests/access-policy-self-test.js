@@ -168,7 +168,7 @@ function main() {
   excludesAll(administratorNames, ['power_action']);
 
   const fullNames = namesFor('full');
-  assert.ok(fullNames.length === 76 || fullNames.length === 72);
+  assert.equal(fullNames.length, 86);
   assert.equal(new Set(fullNames).size, fullNames.length);
 
   const blocked = callBlocked('read_only', 'run_command');

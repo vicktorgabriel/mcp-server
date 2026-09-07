@@ -82,8 +82,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=victor
-WorkingDirectory=/mnt/hdd4tb/repo/mcp-server
+User=mcp
+WorkingDirectory=/opt/mcp-server
 ExecStart=/usr/bin/node mcp-server.js
 Restart=on-failure
 RestartSec=5
