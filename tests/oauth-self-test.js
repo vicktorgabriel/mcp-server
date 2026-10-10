@@ -158,6 +158,21 @@ async function main() {
     const discoveryInitializeBody = await json(discoveryInitialize);
     assert.equal(discoveryInitializeBody.result.serverInfo.name, 'mcp-local-control');
 
+    // Claude only starts OAuth from an HTTP 401 challenge, never from a 200 discovery.
+    for (const [headers, clientInfo] of [
+      [{}, { name: 'claude-code', version: '2.0.0' }],
+      [{ 'user-agent': 'Claude-User' }, { name: 'claude-ai', version: '0.1.0' }]
+    ]) {
+      const claudeInitialize = await fetch(`${base}/mcp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 93, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo } })
+      });
+      assert.equal(claudeInitialize.status, 401);
+      assert.match(claudeInitialize.headers.get('www-authenticate') || '', /resource_metadata="[^"]+\/\.well-known\/oauth-protected-resource\/mcp"/);
+      assert.doesNotMatch(claudeInitialize.headers.get('www-authenticate') || '', /error=/);
+    }
+
     const discoveryTools = await fetch(`${base}/mcp`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

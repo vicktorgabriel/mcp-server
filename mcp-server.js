@@ -1713,6 +1713,28 @@ function oauthToolAuthResult(baseUrl, reason = 'missing_token') {
   };
 }
 
+// ChatGPT descubre herramientas sin token y pide OAuth en tools/call. Claude
+// (Code, Desktop y claude.ai) sólo inicia OAuth ante un 401 con WWW-Authenticate;
+// si initialize responde 200 queda "conectado" sin sesión y toda llamada falla.
+const OAUTH_CHALLENGE_CLIENTS = [...parseCsvSet(
+  process.env.MCP_OAUTH_CHALLENGE_CLIENTS === undefined ? 'claude' : process.env.MCP_OAUTH_CHALLENGE_CLIENTS
+)].map((item) => item.toLowerCase());
+
+function requiresHttpOAuthChallenge(req, requests) {
+  if (OAUTH_CHALLENGE_CLIENTS.length === 0) return false;
+  const identities = [String(req.headers['user-agent'] || '')];
+  for (const request of requests) {
+    if (request && request.method === 'initialize') {
+      const clientInfo = (request.params && request.params.clientInfo) || {};
+      identities.push(String(clientInfo.name || ''));
+    }
+  }
+  return identities.some((identity) => {
+    const value = identity.toLowerCase();
+    return value && OAUTH_CHALLENGE_CLIENTS.some((client) => value.includes(client));
+  });
+}
+
 async function handleOauthDiscoveryRequest(mcp, request, baseUrl) {
   if (!request || request.jsonrpc !== JSONRPC_VERSION) return createError(request && request.id, -32600, 'Invalid JSON-RPC request');
   if (request.id === undefined) return null;
@@ -1766,6 +1788,10 @@ function startHttp() {
       if (AUTH_MODE === 'oauth' && !authResult.ok && authResult.reason === 'missing_token' && url.pathname === '/mcp' && req.method === 'POST') {
         const body = await readJsonBody(req);
         const requests = Array.isArray(body) ? body : [body];
+        if (requiresHttpOAuthChallenge(req, requests)) {
+          OAUTH_PROVIDER.sendProtectedResourceError(req, res, baseUrl, 'missing_token');
+          return;
+        }
         const responses = [];
         for (const request of requests) {
           const response = await handleOauthDiscoveryRequest(mcp, request, baseUrl);
