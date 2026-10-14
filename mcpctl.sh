@@ -40,8 +40,9 @@ show_help() {
 Uso: ./mcpctl.sh COMANDO
 
   status          Resumen legible del MCP, conexión y autenticación
-  url             Muestra la URL activa para ChatGPT
+  url             Muestra la URL activa para ChatGPT / Gemini
   chatgpt         Guía paso a paso para agregarlo en ChatGPT
+  gemini          Guía paso a paso para agregarlo en Google Gemini Web
   configure       Reabre el asistente de ngrok, URL, acceso y autenticación
   catalog         Catálogo legible con categorías, riesgos, estado y razones
   permissions     Muestra el perfil y las herramientas permitidas/bloqueadas
@@ -83,6 +84,9 @@ case "$COMMAND" in
     ;;
   chatgpt)
     node chatgpt-guide.js
+    ;;
+  gemini)
+    node gemini-guide.js
     ;;
   update-check|updates|version-check)
     node startup-banner.js --check-update --force --notify

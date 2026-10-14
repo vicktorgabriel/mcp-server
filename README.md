@@ -1,23 +1,25 @@
 # MCP Local Full Control
 
+> **4.6.1:** Soporte integral para Google Gemini Web (`gemini.google.com` - Apps conectadas / Add MCP Server). Corrige la cadena de redirección OAuth hacia `*.googleusercontent.com` y `*.google.com`, elimina `X-Frame-Options: DENY` en la respuesta 302, amplía `frame-ancestors` en CSP, neutraliza textos específicos de ChatGPT en los formularios de consentimiento y agrega protección visual contra envíos duplicados inmediatos.
+
 > **4.6.0:** 86 herramientas registradas, diez nuevas capacidades de proyecto y seguimiento, catalogo humano por cliente, parches con hash obligatorio, restauraciones propias con deteccion de conflictos, trabajos idempotentes y trazas de comunicacion. Mantiene las correcciones de limites de recursos de la entrega anterior.
 
 > **4.5.3:** corrige el retorno OAuth desde el formulario sandboxed de ChatGPT. La CSP permite ahora únicamente el issuer y el origen del callback registrado, evitando que `form-action` bloquee el redirect después del login. También separa completamente Autorizar/Cancelar, acepta `Origin: null` sólo con Fetch Metadata de navegación segura, serializa el estado OAuth entre procesos, mejora el diagnóstico sin registrar secretos y ordena módulos, pruebas y documentación en carpetas específicas.
 
-Servidor MCP para administrar un equipo propio desde ChatGPT y otros clientes compatibles. Expone herramientas de archivos, comandos, procesos, servicios, Git, tmux, escritorio, captura de pantalla, cámara, audio y diagnóstico del sistema.
+Servidor MCP para administrar un equipo propio desde ChatGPT, Google Gemini y otros clientes compatibles. Expone herramientas de archivos, comandos, procesos, servicios, Git, tmux, escritorio, captura de pantalla, cámara, audio y diagnóstico del sistema.
 
 Incluye:
 
 - un panel de inicio con logo, versión, cantidad de herramientas, perfil, cuenta, confirmaciones y estado de actualización;
 - configuración inicial completa en **una sola terminal**;
-- perfiles de acceso que deciden qué herramientas verá ChatGPT;
+- perfiles de acceso que deciden qué herramientas verá el cliente de IA;
 - 86 herramientas verificadas para archivos, red, paquetes, firewall, montajes, contenedores, escritorio y administración;
 - ejecución opcional como `root`, siempre mediante una aceptación de riesgo explícita;
 - confirmaciones críticas opcionales para quienes necesiten automatización total;
 - comprobación de actualizaciones en segundo plano, con aviso de color cuando hay una versión nueva;
 - arranque y detección de capacidades optimizados;
 - guardado automático del endpoint de ngrok;
-- OAuth 2.1 integrado para ChatGPT con CIMD + DCR, PKCE, `none`/`private_key_jwt` y refresh tokens;
+- OAuth 2.1 integrado para ChatGPT y Google Gemini con CIMD + DCR, PKCE, `none`/`private_key_jwt` y refresh tokens;
 - modo temporal o servicio persistente;
 - registros explicados en lenguaje legible;
 - separación estricta entre configuración pública del repositorio y secretos locales.
@@ -490,12 +492,30 @@ Actualmente, el MCP completo con acciones de escritura/modificación está dispo
 
 Sólo agregues servidores que controles y revisá las herramientas antes de habilitarlas para otros usuarios.
 
+## Cómo agregarlo a Google Gemini Web
+
+Google Gemini permite conectar servidores MCP remotos personalizados directamente en su versión web (`gemini.google.com`) mediante su catálogo de extensiones o herramientas personalizadas:
+
+1. Ejecutá `./mcpctl.sh gemini` o `./mcpctl.sh url` para obtener la URL pública con endpoint `/mcp` (por ejemplo `https://tu-dominio.ngrok-free.dev/mcp`).
+2. En Google Gemini Web (`gemini.google.com`), abrí el panel de **Herramientas / Extensiones** o la configuración de extensiones.
+3. Seleccioná **Agregar herramienta / Añadir MCP personalizado**.
+4. Pegá la URL pública terminada en `/mcp`.
+5. Si usás **OAuth**: Gemini detectará la configuración de autorización automáticamente vía Dynamic Client Registration (DCR) y el endpoint de autorización.
+6. Hacé clic en **Conectar / Autorizar**. Se abrirá la ventana emergente de login seguro del MCP local.
+7. Ingresá el usuario y contraseña del MCP configurados en tu servidor y pulsá **Autorizar** (una sola vez).
+8. La ventana emergente completará la redirección con Google (`oauth-redirect.googleusercontent.com`) y se cerrará automáticamente.
+9. En el chat con Gemini, probá invocar una herramienta como `tool_policy_status` o `system_info` para verificar la conexión.
+
+> [!NOTE]
+> Las versiones 4.6.1 y superiores configuran automáticamente las cabeceras CSP (`form-action`, `frame-ancestors`) y políticas de origen cruzado para permitir el salto de autorización entre Google Gemini y el servidor MCP sin bloqueos por políticas del navegador. Consultá la [Guía técnica de OAuth en Gemini Web](docs/GEMINI_WEB_OAUTH.md) para más detalles.
+
 ## Comandos principales
 
 ```bash
 ./mcpctl.sh status          # Estado resumido
-./mcpctl.sh url             # URL exacta para ChatGPT
-./mcpctl.sh chatgpt         # Guía de conexión
+./mcpctl.sh url             # URL exacta para ChatGPT o Gemini
+./mcpctl.sh chatgpt         # Guía de conexión para ChatGPT
+./mcpctl.sh gemini          # Guía de conexión para Google Gemini Web
 ./mcpctl.sh configure       # Reconfigurar carpetas, perfil, exposición y autenticación
 ./mcpctl.sh permissions     # Mostrar perfil y herramientas permitidas/bloqueadas
 ./mcpctl.sh permissions --tools  # Mostrar las listas completas
@@ -695,8 +715,13 @@ Las pruebas cubren sintaxis, panel de inicio y caché de actualización, perfile
 
 MIT.
 
-## Novedades y migracion a 4.6.0
+## Novedades y migración
 
-La version 4.6.0 agrega diez herramientas (86 en total), permisos por cliente, ediciones con hash y restauracion protegida, seguimiento de trabajos y diagnostico sin afirmar protecciones no verificadas.
+### Versión 4.6.1
+- **Compatibilidad con Google Gemini Web:** Soporte integral para registrar y utilizar el MCP como herramienta personalizada en `gemini.google.com`.
+- **Corrección de flujo de autorización y CSP:** Ajuste de directivas `form-action` y `frame-ancestors` en la CSP para permitir saltos hacia `*.googleusercontent.com` y `*.google.com`, eliminación de `X-Frame-Options: DENY` y configuración de `Cross-Origin-Resource-Policy: cross-origin` en redirecciones 302.
+- **Protección contra doble envío:** Deshabilitación inmediata y mensaje de estado ("Autorizando...") al pulsar el botón de login para evitar vencimiento prematuro de transacciones OAuth de un solo uso.
+- **Nuevo comando y documentación:** Agregado `./mcpctl.sh gemini` y documentación técnica en [`docs/GEMINI_WEB_OAUTH.md`](docs/GEMINI_WEB_OAUTH.md).
 
-Consulte la [guia de herramientas, permisos y migracion](docs/TOOLS_V4_6.md) para ejemplos, limites y configuracion. Los modulos nuevos estan en `lib/tools/` y las pruebas en `tests/tools/`; los comandos de inicio existentes no cambian.
+### Versión 4.6.0
+La versión 4.6.0 agrega diez herramientas (86 en total), permisos por cliente, ediciones con hash y restauración protegida, seguimiento de trabajos y diagnóstico sin afirmar protecciones no verificadas. Consulte la [guía de herramientas, permisos y migración](docs/TOOLS_V4_6.md) para ejemplos, límites y configuración. Los módulos nuevos están en `lib/tools/` y las pruebas en `tests/tools/`; los comandos de inicio existentes no cambian.
